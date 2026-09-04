@@ -80,7 +80,8 @@ agy models
 rg -n 'AGY_ADC_AUTH' AGENTS.md docs \
   --glob '!docs/delivery/task-cards/TASK-005.md' \
   --glob '!docs/delivery/task-cards/TASK-006.md' \
-  --glob '!docs/delivery/task-cards/TASK-008.md'
+  --glob '!docs/delivery/task-cards/TASK-008.md' \
+  --glob '!docs/delivery/decisions/0001-antigravity-ship-routing.md'
 node scripts/check.mjs
 git diff --check master...HEAD
 ```
