@@ -1,7 +1,7 @@
 ---
 id: TASK-007
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Add deterministic, process-attributed Antigravity stall detection and prove it in an alert-only live dogfood trial.'
 provenance: 'Operator-approved Antigravity watchdog semantics and Antigravity 1.1.26 dogfood, 2026-09-04'
