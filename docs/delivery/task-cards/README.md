@@ -26,4 +26,4 @@ exists only for repos without a live-state home.
 | `TASK-005` | [Adopt Antigravity ship lanes](TASK-005.md) | abandoned |
 | `TASK-006` | [Complete Antigravity routing policy](TASK-006.md) | merged |
 | `TASK-007` | [Detect stalled Antigravity lanes](TASK-007.md) | draft |
-| `TASK-008` | [Remove ADC auth from Antigravity routing](TASK-008.md) | draft |
+| `TASK-008` | [Remove ADC auth from Antigravity routing](TASK-008.md) | merged |

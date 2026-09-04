@@ -1,7 +1,7 @@
 ---
 id: TASK-008
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Remove ADC authentication from active Antigravity ship invocations and use the operator-configured plain agy command.'
 provenance: 'Operator billing-route correction, 2026-09-04'
