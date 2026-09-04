@@ -19,4 +19,4 @@ exists only for repos without a live-state home.
 
 | ID | Title | Status |
 |---|---|---|
-| *(none yet)* | | |
+| `TASK-001` | [Repair lane-watchdog attribution and testability](TASK-001.md) | draft |
