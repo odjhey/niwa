@@ -23,3 +23,4 @@ exists only for repos without a live-state home.
 | `TASK-002` | [Harden watchdog command contracts and marker cleanup](TASK-002.md) | abandoned |
 | `TASK-003` | [Complete watchdog state synchronization](TASK-003.md) | merged |
 | `TASK-004` | [Document script usage](TASK-004.md) | merged |
+| `TASK-005` | [Adopt Antigravity ship lanes](TASK-005.md) | draft |
