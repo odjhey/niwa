@@ -1,7 +1,7 @@
 ---
 id: TASK-003
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Recover the blocked watchdog hardening candidate with explicit runtime lock-failure handling and silent atomic marker claims.'
 provenance: 'Successor to TASK-002 / orc run 4L532F, rejected candidate 6f5bb4267189edbfd052815381e1bb39c37e97ce, 2026-09-04'
