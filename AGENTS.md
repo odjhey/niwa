@@ -106,7 +106,7 @@ default tier unless the sizing rules in `OPERATING-MODEL` (Task sizing
 → Dispatch size) class the dispatch as large or judgment-heavy.
 Oversized cards are split before dispatch, never powered through.
 
-The default ship command preserves `AGY_ADC_AUTH=true agy --model "Gemini 3.8 Flash (High)" --dangerously-skip-permissions -p "<prompt>"`.
+The default ship command preserves `agy --model "Gemini 3.8 Flash (High)" --dangerously-skip-permissions -p "<prompt>"`.
 The standing ship invocation must include an explicit, sized, bounded `--print-timeout`
 (use 20 minutes as the default ceiling for this repo's already-bounded ship cards,
 while oversized work is still split) because dogfood revealed the built-in 5-minute

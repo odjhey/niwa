@@ -60,13 +60,13 @@ fresh with a self-contained brief rather than resuming, per `DECISION-0002`:
 
 ```bash
 # First turn (default ship seat; points to file brief)
-AGY_ADC_AUTH=true agy --model "Gemini 3.8 Flash (High)" \
+agy --model "Gemini 3.8 Flash (High)" \
   --dangerously-skip-permissions --print-timeout 20m \
   -p "Read the file /path/to/brief.md and execute it exactly as your ship brief in your current worktree." \
   > out.md 2> err.log
 
 # Corrective turn starts fresh with self-contained corrective brief
-AGY_ADC_AUTH=true agy --model "Gemini 3.8 Flash (High)" \
+agy --model "Gemini 3.8 Flash (High)" \
   --dangerously-skip-permissions --print-timeout 20m \
   -p "Read the file /path/to/corrective-brief.md and execute it exactly as a fresh corrective ship brief in your current worktree." \
   > out-corrective.md 2> err-corrective.log
@@ -93,7 +93,7 @@ dispatch-and-poll**:
    (default ship seat Antigravity shown; capture stdout/stderr):
 
    ```bash
-   AGY_ADC_AUTH=true agy --model "Gemini 3.8 Flash (High)" \
+   agy --model "Gemini 3.8 Flash (High)" \
      --dangerously-skip-permissions \
      --print-timeout 20m \
      -p "Read the file $(pwd)/brief-<lane>.md and execute it exactly as your ship brief in your current worktree." \

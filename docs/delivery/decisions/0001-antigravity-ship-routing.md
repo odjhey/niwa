@@ -13,6 +13,9 @@ description: 'Adopt Antigravity Gemini 3.8 Flash for ship tiers, Luna for defaul
 **Decided by:** operator
 **Provenance:** Operator ruling and Antigravity 1.1.26 dogfood, 2026-09-04 (TASK-005)
 
+> [!NOTE]
+> **Superseded in part (2026-09-04):** Only the ADC auth prefix in Choice item 2 is superseded by [DECISION-0003](0003-antigravity-auth-routing.md). Plain operator-configured `agy` is required; all other routing and assurance choices remain active.
+
 ## Context
 
 Prior seat routing relied on GPT-5.6 Sol across watchtower, ship, and recon roles, required paired verification for final pre-merge convergence rounds, and retained legacy secondary harness references in active documentation. To leverage Google Antigravity for implementation while maintaining independent provider assurance, lower execution overhead, and clean up inactive seat references, an operator ruling on concrete seat allocations was established.

@@ -141,3 +141,4 @@ are the searchable detail.
 |---|---|---|
 | [0001](0001-antigravity-ship-routing.md) | Antigravity ship routing and assurance simplification | approved |
 | [0002](0002-antigravity-resume-deferral.md) | Antigravity session resume deferral | approved |
+| [0003](0003-antigravity-auth-routing.md) | Antigravity operator authentication routing | approved |
