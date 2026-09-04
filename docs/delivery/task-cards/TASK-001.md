@@ -1,7 +1,7 @@
 ---
 id: TASK-001
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Make the existing alert-only lane watchdog deterministic, testable, and correctly attributed per monitored process.'
 provenance: 'Detecting Headless Stalls chat, /Users/odz/Downloads/Detecting Headless Stalls (2026-09-04).md; recon workflow 15a24b36-71c9-4803-adbc-bb86b51ed0b7'

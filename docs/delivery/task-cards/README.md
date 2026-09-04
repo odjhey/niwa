@@ -19,4 +19,5 @@ exists only for repos without a live-state home.
 
 | ID | Title | Status |
 |---|---|---|
-| `TASK-001` | [Repair lane-watchdog attribution and testability](TASK-001.md) | draft |
+| `TASK-001` | [Repair lane-watchdog attribution and testability](TASK-001.md) | merged |
+| `TASK-002` | [Harden watchdog command contracts and marker cleanup](TASK-002.md) | draft |
