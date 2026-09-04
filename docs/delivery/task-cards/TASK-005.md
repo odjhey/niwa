@@ -1,7 +1,7 @@
 ---
 id: TASK-005
 type: task-card
-status: draft
+status: abandoned
 authority: normative
 description: 'Adopt Antigravity as the default ship seat, simplify assurance routing, and retire active Qoder support.'
 provenance: 'Operator ruling and Antigravity 1.1.26 dogfood, 2026-09-04'
