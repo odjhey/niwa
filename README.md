@@ -59,6 +59,8 @@ For a bounded probe, use an isolated temporary state directory and set `WD_MAX_I
 | `WD_ALT_HOME` | `$HOME/.claude-alt` | Alternate Claude `CLAUDE_CONFIG_DIR`. A Claude process is attributable only through its own open transcript under `$WD_ALT_HOME/projects/*/*.jsonl`. |
 | `WD_CODEX_SECS` | `900` seconds | Codex elapsed-time and own-rollout-silence threshold. A claim also requires less than 2 seconds of process CPU; the comparisons are strict (`>` threshold). |
 | `WD_ALT_SECS` | `1200` seconds | Strict (`>`) alternate-Claude own-transcript silence threshold. |
+| `WD_AGY_STARTUP_SECS` | `60` seconds | Strict (`>`) Antigravity startup threshold for missing own conversation database evidence. |
+| `WD_AGY_SECS` | `900` seconds | Strict (`>`) Antigravity own conversation database (`.db` or `.db-wal`) silence threshold. |
 | `WD_IDLE_SECS` | `1800` seconds | Watchtower transcript idle threshold for a heartbeat (`>=` threshold). |
 | `WD_MAX_ITERATIONS` | `0` (unbounded) | Iteration limit. A positive value bounds the run; `1` performs one iteration without a sampling sleep. |
 | `WD_STATE_DIR` | `${TMPDIR:-/tmp}` | Existing writable directory for the shared `.wd-sensors.lock` and process-incarnation alert markers. Cooperating watchdogs sharing it suppress duplicate alerts; conclusive recovery or disappearance clears owned marker state. |
@@ -68,6 +70,7 @@ The watchdog writes advisory records to stdout:
 
 - `STALL:` — a Codex process exceeded the elapsed threshold with less than 2 seconds of CPU and its own rollout is missing or exceeded the silence threshold.
 - `ALT-SEAT STALL:` — an attributable alternate-Claude process's own open transcript exceeded its silence threshold.
+- `AGY STALL:` — an Antigravity print-mode process exceeded the startup threshold without an attributable conversation database or exceeded the silence threshold since its newest own database update.
 - `HEARTBEAT:` — this watchtower transcript reached the idle threshold; the board should be checked.
 
 > **Alert-only:** every record is a claim that requires manual evidence verification before any process action. The watchdog never kills, signals, owns, or reaps a process.
@@ -87,6 +90,7 @@ The watchdog writes advisory records to stdout:
 
 - Missing `zsh/system` or `zsystem flock` support, an unusable startup lock path, and runtime lock acquire/release errors are fatal and print `lane-watchdog:` diagnostics to stderr.
 - No process-owned alternate-Claude transcript is non-conclusive; the watchdog does not borrow a sibling or global transcript. Discovery failures likewise preserve existing sensor markers rather than inferring recovery. For Codex only, a missing own rollout can contribute to `STALL:` when the elapsed-time and CPU predicates also hold.
+- Antigravity discovery requires exact `comm=agy` and a space/token-delimited `-p` or `--print` option (interactive `agy` is excluded); progress is attributed only to the selected PID's own open `$HOME/.gemini/antigravity-cli/conversations/*.db` or `*.db-wal`. A failed lookup or matched-file `stat` failure is non-conclusive and disables cleanup only for Antigravity.
 - Run the watchdog from the intended working directory: default transcript discovery derives `<cwd-slug>` from that directory.
 
 For contract questions, follow [DOCS-ROOT](docs/README.md) and the governing documents it registers rather than treating this usage guide as normative.

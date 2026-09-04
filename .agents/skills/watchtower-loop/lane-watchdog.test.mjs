@@ -43,6 +43,11 @@ if (command === 'date') {
     pids = Object.entries(fixture.processes)
       .filter(([, proc]) => proc.comm === 'claude')
       .map(([pid]) => pid)
+  } else if (args.length === 2 && args[0] === '-x' && args[1] === 'agy') {
+    sensor = 'agy'
+    pids = fixture.agyPids ?? Object.entries(fixture.processes)
+      .filter(([, proc]) => proc.comm === 'agy')
+      .map(([pid]) => pid)
   } else {
     process.exitCode = 64
   }
@@ -61,12 +66,13 @@ if (command === 'date') {
   const field = args[args.indexOf('-o') + 1].replace(/=$/, '')
   const pid = args[args.indexOf('-p') + 1]
   const proc = fixture.processes[pid]
-  if (!proc || proc[field] === undefined) process.exitCode = 1
-  else print(proc[field])
+  const value = proc ? (proc[field] ?? (field === 'args' ? proc.argv : undefined)) : undefined
+  if (!proc || value === undefined) process.exitCode = 1
+  else print(value)
 } else if (command === 'lsof') {
   const pid = args[2]
   const proc = fixture.processes[pid]
-  if (args.length !== 3 || args[0] !== '-Fn' || args[1] !== '-p' || !proc) {
+  if (args.length !== 3 || args[0] !== '-Fn' || args[1] !== '-p' || !proc || fixture.lsofFail?.[pid]) {
     process.exitCode = 1
   } else {
     print('p' + pid)
@@ -94,12 +100,14 @@ function makeHarness(t) {
   const bin = join(root, 'fake bin')
   const stateDir = join(root, 'state markers')
   const altHome = join(root, 'alternate claude home')
+  const agyConvDir = join(root, '.gemini', 'antigravity-cli', 'conversations')
   const transcript = join(root, 'watchtower transcript.jsonl')
   const fixturePath = join(root, 'fixture.json')
   const sleepLog = join(root, 'sleep.log')
   mkdirSync(bin)
   mkdirSync(stateDir)
   mkdirSync(altHome)
+  mkdirSync(agyConvDir, { recursive: true })
   const fakeCommand = join(bin, 'fake-command.mjs')
   writeFileSync(fakeCommand, fakeCommandSource)
   chmodSync(fakeCommand, 0o755)
@@ -206,7 +214,7 @@ function makeHarness(t) {
     return readdirSync(stateDir).filter((name) => name.startsWith(`.wd-${sensor}-`)).sort()
   }
 
-  return { altHome, invokeLsof, markers, run, runRaw, spawnRun, stateDir, transcript }
+  return { agyConvDir, altHome, invokeLsof, markers, run, runRaw, spawnRun, stateDir, transcript }
 }
 
 function holdSensorLock(lockFile) {
@@ -252,14 +260,21 @@ function holdSensorLock(lockFile) {
 }
 
 function processFixture({
-  argv = '',
+  args,
+  argv,
   comm,
   cputime = '00:01',
   etime = '01:41',
   lstart,
   openFiles = [],
 }) {
-  return { argv, comm, cputime, etime, lstart, openFiles }
+  const proc = { comm, cputime, etime, lstart, openFiles }
+  const procArgs = args !== undefined ? args : (argv !== undefined ? argv : undefined)
+  if (procArgs !== undefined) {
+    proc.args = procArgs
+    proc.argv = procArgs
+  }
+  return proc
 }
 
 test('fake lsof accepts only -Fn -p followed by a known fixture PID', (t) => {
@@ -834,4 +849,421 @@ test('the watchdog remains notification-only and has no debug leftovers', () => 
   assert.doesNotMatch(source, /^\s*(?:command\s+)?(?:kill|pkill|killall)\b/m)
   assert.doesNotMatch(source, /\b(?:orc|ergo)\s+(?:record|dispatch|result|done|fail|cancel)\b/)
   assert.doesNotMatch(source, new RegExp('\\[DE' + 'BUG-[^\\]]+\\]'))
+})
+
+test('Antigravity candidate discovery enforces exact comm, print-token boundaries, and excludes interactive processes', (t) => {
+  const harness = makeHarness(t)
+  const dbPath = (name) => join(harness.agyConvDir, `${name}.db`)
+  const staleMtime = 8_000
+
+  const processes = {
+    101: processFixture({ comm: 'not-agy', args: 'not-agy -p test', etime: '02:00', lstart: 'start-101', openFiles: [dbPath('c101')] }),
+    102: processFixture({ comm: 'agy', args: 'agy', etime: '02:00', lstart: 'start-102', openFiles: [dbPath('c102')] }),
+    103: processFixture({ comm: 'agy', args: 'agy --model "Gemini 3.8 Flash (High)"', etime: '02:00', lstart: 'start-103', openFiles: [dbPath('c103')] }),
+    104: processFixture({ comm: 'agy', args: 'agy -profile custom', etime: '02:00', lstart: 'start-104', openFiles: [dbPath('c104')] }),
+    105: processFixture({ comm: 'agy', args: 'agy foo-p bar', etime: '02:00', lstart: 'start-105', openFiles: [dbPath('c105')] }),
+    106: processFixture({ comm: 'agy', args: 'agy --print-timeout 20m', etime: '02:00', lstart: 'start-106', openFiles: [dbPath('c106')] }),
+    107: processFixture({ comm: 'agy', args: 'agy -p "read brief"', etime: '02:00', lstart: 'start-107', openFiles: [dbPath('c107')] }),
+    108: processFixture({ comm: 'agy', args: 'agy --print "read brief"', etime: '02:00', lstart: 'start-108', openFiles: [dbPath('c108')] }),
+    109: processFixture({ comm: 'agy', args: 'agy --print-timeout 20m -p "read brief"', etime: '02:00', lstart: 'start-109', openFiles: [dbPath('c109')] }),
+    110: processFixture({ comm: 'agy', args: "agy\t-p\t'read brief'", etime: '02:00', lstart: 'start-110', openFiles: [dbPath('c110')] }),
+  }
+
+  const mtimes = {
+    [dbPath('c101')]: staleMtime,
+    [dbPath('c102')]: staleMtime,
+    [dbPath('c103')]: staleMtime,
+    [dbPath('c104')]: staleMtime,
+    [dbPath('c105')]: staleMtime,
+    [dbPath('c106')]: staleMtime,
+    [dbPath('c107')]: staleMtime,
+    [dbPath('c108')]: staleMtime,
+    [dbPath('c109')]: staleMtime,
+    [dbPath('c110')]: staleMtime,
+  }
+
+  const { lines } = harness.run({ processes, mtimes }, { WD_AGY_SECS: '900' })
+  const alertedPids = lines.map((l) => l.match(/pid (\d+)/)?.[1]).sort()
+  assert.deepEqual(alertedPids, ['107', '108', '109', '110'])
+  assert.ok(lines.every((l) => l.startsWith('AGY STALL:') && l.includes('own conversation database 2000s silent')))
+})
+
+test('Antigravity evidence isolates sibling PIDs, accepts .db-wal, and excludes .db-shm, summary DBs, logs, and stdout', (t) => {
+  const harness = makeHarness(t)
+  const convDir = harness.agyConvDir
+  const dbStale = join(convDir, 'stale.db')
+  const dbFresh = join(convDir, 'fresh.db')
+  const walStale = join(convDir, 'wal-stale.db-wal')
+  const walFresh = join(convDir, 'wal-fresh.db-wal')
+  const shmFresh = join(convDir, 'fresh.db-shm')
+  const summaryDbFresh = join(convDir, 'conversation_summaries.db')
+  const summaryWalFresh = join(convDir, 'conversation_summaries.db-wal')
+  const logFresh = join(convDir, 'agent.log')
+  const stdoutFresh = join(harness.stateDir, 'stdout.log')
+
+  const processes = {
+    201: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-201', openFiles: [dbStale] }),
+    202: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-202', openFiles: [dbFresh] }),
+    203: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-203', openFiles: [walFresh] }),
+    204: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-204', openFiles: [dbStale, shmFresh] }),
+    205: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-205', openFiles: [dbStale, summaryDbFresh, summaryWalFresh] }),
+    206: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-206', openFiles: [dbStale, logFresh] }),
+    207: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-207', openFiles: [dbStale, stdoutFresh] }),
+    208: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-208', openFiles: [dbStale, walStale] }),
+  }
+
+  const mtimes = {
+    [dbStale]: 8_000,
+    [dbFresh]: 9_950,
+    [walFresh]: 9_950,
+    [walStale]: 8_500,
+    [shmFresh]: 9_950,
+    [summaryDbFresh]: 9_950,
+    [summaryWalFresh]: 9_950,
+    [logFresh]: 9_950,
+    [stdoutFresh]: 9_950,
+  }
+
+  const { lines } = harness.run({ processes, mtimes }, { WD_AGY_SECS: '900' })
+  const alerted = Object.fromEntries(lines.map((l) => [l.match(/pid (\d+)/)?.[1], l]))
+  assert.ok(alerted['201'])
+  assert.equal(alerted['202'], undefined)
+  assert.equal(alerted['203'], undefined)
+  assert.ok(alerted['204'])
+  assert.ok(alerted['205'])
+  assert.ok(alerted['206'])
+  assert.ok(alerted['207'])
+  assert.ok(alerted['208'])
+  assert.match(alerted['208'], /own conversation database 1500s silent/)
+})
+
+test('Antigravity enforces strict startup 60s and silence 900s boundaries and parses all elapsed shapes', (t) => {
+  const harness = makeHarness(t)
+  const dbBoundary = join(harness.agyConvDir, 'boundary.db')
+
+  const processes = {
+    301: processFixture({ comm: 'agy', args: 'agy -p run', etime: '01:00', lstart: 'start-301' }),
+    302: processFixture({ comm: 'agy', args: 'agy -p run', etime: '01:01', lstart: 'start-302' }),
+    303: processFixture({ comm: 'agy', args: 'agy -p run', etime: '00:01:01', lstart: 'start-303' }),
+    304: processFixture({ comm: 'agy', args: 'agy -p run', etime: '0-00:01:01', lstart: 'start-304' }),
+    305: processFixture({ comm: 'agy', args: 'agy -p run', etime: '00:59', lstart: 'start-305' }),
+    306: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-306', openFiles: [dbBoundary] }),
+    307: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-307', openFiles: [dbBoundary] }),
+  }
+
+  const run1 = harness.run({
+    processes: { 301: processes[301], 302: processes[302], 303: processes[303], 304: processes[304], 305: processes[305], 306: processes[306] },
+    mtimes: { [dbBoundary]: 9_100 },
+  })
+  const alerted1 = run1.lines.map((l) => l.match(/pid (\d+)/)?.[1]).sort()
+  assert.deepEqual(alerted1, ['302', '303', '304'])
+  assert.ok(run1.lines.every((l) => l.includes('own conversation database missing after 61s')))
+
+  const run2 = harness.run({
+    processes: { 307: processes[307] },
+    mtimes: { [dbBoundary]: 9_099 },
+  })
+  assert.equal(run2.lines.length, 1)
+  assert.match(run2.lines[0], /AGY STALL: agy pid 307 own conversation database 901s silent/)
+})
+
+test('failed/empty args, comm, lstart, pgrep >1, failed lsof, and matched stat failure fail closed only for agy', (t) => {
+  const harness = makeHarness(t)
+  const dbPath = join(harness.agyConvDir, 'fail-closed.db')
+  const altTranscript = join(harness.altHome, 'projects', 'p1', 'session.jsonl')
+  const env = { WD_AGY_SECS: '100', WD_ALT_SECS: '100' }
+
+  const initial = harness.run(
+    {
+      processes: {
+        401: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-401', openFiles: [dbPath] }),
+        402: processFixture({ comm: 'claude', lstart: 'start-402', openFiles: [altTranscript] }),
+      },
+      mtimes: { [dbPath]: 9_800, [altTranscript]: 9_800 },
+    },
+    env,
+  )
+  assert.equal(initial.lines.length, 2)
+  const agyMarker = harness.markers('agy')
+  const altMarker = harness.markers('alt')
+  assert.equal(agyMarker.length, 1)
+  assert.equal(altMarker.length, 1)
+
+  // 1. Failed args (undefined args) preserves agy marker, does not alert, alt cleans up if disappeared
+  harness.run({
+    processes: {
+      401: { comm: 'agy', etime: '20:00', lstart: 'start-401', openFiles: [dbPath] },
+    },
+    mtimes: { [dbPath]: 9_800 },
+  }, env)
+  assert.deepEqual(harness.markers('agy'), agyMarker)
+  assert.deepEqual(harness.markers('alt'), [])
+
+  // 2. Empty args ('') preserves agy marker
+  harness.run({
+    processes: {
+      401: processFixture({ comm: 'agy', args: '', etime: '20:00', lstart: 'start-401', openFiles: [dbPath] }),
+    },
+    mtimes: { [dbPath]: 9_800 },
+  }, env)
+  assert.deepEqual(harness.markers('agy'), agyMarker)
+
+  // 3. Failed comm (undefined comm) preserves agy marker
+  harness.run({
+    agyPids: ['401'],
+    processes: {
+      401: { args: 'agy -p run', etime: '20:00', lstart: 'start-401', openFiles: [dbPath] },
+    },
+    mtimes: { [dbPath]: 9_800 },
+  }, env)
+  assert.deepEqual(harness.markers('agy'), agyMarker)
+
+  // 4. Failed lstart (undefined lstart or empty) preserves agy marker
+  harness.run({
+    processes: {
+      401: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: '', openFiles: [dbPath] }),
+    },
+    mtimes: { [dbPath]: 9_800 },
+  }, env)
+  assert.deepEqual(harness.markers('agy'), agyMarker)
+
+  // 5. pgrep > 1 preserves agy marker
+  harness.run({
+    pgrepStatus: { agy: 2 },
+  }, env)
+  assert.deepEqual(harness.markers('agy'), agyMarker)
+
+  // 6. Failed lsof preserves agy marker
+  harness.run({
+    processes: {
+      401: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-401', openFiles: [dbPath] }),
+    },
+    lsofFail: { 401: true },
+    mtimes: { [dbPath]: 9_800 },
+  }, env)
+  assert.deepEqual(harness.markers('agy'), agyMarker)
+
+  // 7. Matched stat failure (file in openFiles but not in mtimes) preserves agy marker
+  harness.run({
+    processes: {
+      401: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-401', openFiles: [dbPath] }),
+    },
+    mtimes: {},
+  }, env)
+  assert.deepEqual(harness.markers('agy'), agyMarker)
+
+  // Conclusive disappearance cleans up agy marker
+  harness.run({}, env)
+  assert.deepEqual(harness.markers('agy'), [])
+})
+
+test('Antigravity handles suppression, recovery, PID reuse, disappearance, live siblings, and unrelated state', (t) => {
+  const harness = makeHarness(t)
+  const db1 = join(harness.agyConvDir, 'conv1.db')
+  const db2 = join(harness.agyConvDir, 'conv2.db')
+  const env = { WD_AGY_SECS: '100' }
+
+  // 501 and 502 both suspect
+  const init = harness.run({
+    processes: {
+      501: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-501', openFiles: [db1] }),
+      502: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-502', openFiles: [db2] }),
+    },
+    mtimes: { [db1]: 9_800, [db2]: 9_800 },
+  }, env)
+  assert.equal(init.lines.length, 2)
+  assert.equal(harness.markers('agy').length, 2)
+
+  // Repeated iteration: suppressed, 0 alerts, 0 stderr
+  const repeat = harness.run({
+    processes: {
+      501: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-501', openFiles: [db1] }),
+      502: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-502', openFiles: [db2] }),
+    },
+    mtimes: { [db1]: 9_800, [db2]: 9_800 },
+  }, env)
+  assert.deepEqual(repeat.lines, [])
+  assert.equal(repeat.stderr, '')
+
+  // Recovery: 501 gets fresh evidence (mtime 9950), 502 stays suspect
+  const recovery = harness.run({
+    processes: {
+      501: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-501', openFiles: [db1] }),
+      502: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-502', openFiles: [db2] }),
+    },
+    mtimes: { [db1]: 9_950, [db2]: 9_800 },
+  }, env)
+  assert.deepEqual(recovery.lines, [])
+  assert.equal(harness.markers('agy').length, 1)
+  assert.match(harness.markers('agy')[0], /-502-/)
+
+  // 501 becomes suspect again -> alerts again
+  const reStall = harness.run({
+    processes: {
+      501: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-501', openFiles: [db1] }),
+      502: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-502', openFiles: [db2] }),
+    },
+    mtimes: { [db1]: 9_800, [db2]: 9_800 },
+  }, env)
+  assert.equal(reStall.lines.length, 1)
+  assert.match(reStall.lines[0], /pid 501/)
+  assert.equal(harness.markers('agy').length, 2)
+
+  // 502 disappears, 501 still live -> 502 marker removed, 501 marker preserved
+  writeFileSync(join(harness.stateDir, 'unrelated-marker.txt'), 'preserve')
+  const dis = harness.run({
+    processes: {
+      501: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-501', openFiles: [db1] }),
+    },
+    mtimes: { [db1]: 9_800 },
+  }, env)
+  assert.deepEqual(dis.lines, [])
+  assert.equal(harness.markers('agy').length, 1)
+  assert.match(harness.markers('agy')[0], /-501-/)
+  assert.equal(readFileSync(join(harness.stateDir, 'unrelated-marker.txt'), 'utf8'), 'preserve')
+
+  // PID reuse: 501 PID reused with new lstart
+  const reuse = harness.run({
+    processes: {
+      501: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'new-start-501', openFiles: [db1] }),
+    },
+    mtimes: { [db1]: 9_800 },
+  }, env)
+  assert.equal(reuse.lines.length, 1)
+  assert.match(reuse.lines[0], /pid 501/)
+  assert.equal(harness.markers('agy').length, 1)
+  assert.match(harness.markers('agy')[0], /new_start_501/)
+})
+
+test('cooperating watchdogs serialize one first AGY alert and busy lock preserves .wd-agy-* state', { timeout: 10_000 }, async (t) => {
+  const harness = makeHarness(t)
+  const dbPath = join(harness.agyConvDir, 'coop.db')
+  const lockFile = join(harness.stateDir, '.wd-sensors.lock')
+  const agyMarker = '.wd-agy-601-held_incarnation'
+  writeFileSync(join(harness.stateDir, agyMarker), 'agy sentinel')
+
+  // Busy lock preserves marker while heartbeat active
+  const holder = holdSensorLock(lockFile)
+  t.after(() => holder.release())
+  await holder.ready
+
+  const busyResult = harness.run(
+    {
+      now: 10_000,
+      processes: {
+        601: processFixture({ comm: 'agy', args: 'agy -p run', lstart: 'new agy incarnation', openFiles: [dbPath] }),
+      },
+      mtimes: { [harness.transcript]: 8_000, [dbPath]: 8_000 },
+    },
+    { WD_IDLE_SECS: '100', WD_AGY_SECS: '100' },
+  )
+  assert.deepEqual(busyResult.lines, ['HEARTBEAT: idle 33min, codex=0 alt=0 — board check due'])
+  assert.equal(busyResult.stderr, '')
+  assert.deepEqual(harness.markers('agy'), [agyMarker])
+  assert.equal(readFileSync(join(harness.stateDir, agyMarker), 'utf8'), 'agy sentinel')
+
+  await holder.release()
+  rmSync(join(harness.stateDir, agyMarker))
+
+  // Cooperating watchdogs serialize one first marker claim
+  const fixture = {
+    blockPgrep: 'agy',
+    blockReadyPath: join(harness.stateDir, 'first-watchdog-holds-agy-lock'),
+    processes: {
+      602: processFixture({ comm: 'agy', args: 'agy -p run', lstart: 'shared agy incarnation', openFiles: [dbPath] }),
+    },
+    mtimes: { [dbPath]: 9_800 },
+  }
+  const env = { WD_AGY_SECS: '100' }
+
+  const first = harness.spawnRun(fixture, env)
+  t.after(() => {
+    if (!first.child.stdin.writableEnded) first.child.stdin.end()
+    return first.completed
+  })
+  await first.blocked
+
+  const second = harness.spawnRun(fixture, env)
+  t.after(() => {
+    if (!second.child.stdin.writableEnded) second.child.stdin.end()
+    return second.completed
+  })
+  second.child.stdin.end()
+  const secondResult = await second.completed
+  assert.equal(secondResult.status, 0, secondResult.stderr)
+  assert.deepEqual(secondResult.lines, [])
+  assert.deepEqual(harness.markers('agy'), [])
+
+  first.child.stdin.end()
+  const firstResult = await first.completed
+  assert.equal(firstResult.status, 0, firstResult.stderr)
+  assert.equal([...firstResult.lines, ...secondResult.lines].length, 1)
+  assert.match(firstResult.lines[0], /AGY STALL: agy pid 602 /)
+  assert.equal(harness.markers('agy').length, 1)
+})
+
+test('Antigravity production defaults and threshold overrides remain effective', (t) => {
+  const harness = makeHarness(t)
+  const dbPath = join(harness.agyConvDir, 'defaults.db')
+
+  const fixture = {
+    now: 10_000,
+    processes: {
+      701: processFixture({ comm: 'agy', args: 'agy -p run', etime: '01:01', lstart: 'start-701' }),
+      702: processFixture({ comm: 'agy', args: 'agy -p run', etime: '20:00', lstart: 'start-702', openFiles: [dbPath] }),
+    },
+    mtimes: { [dbPath]: 9_099 },
+  }
+
+  const defaults = harness.run(fixture)
+  assert.equal(defaults.lines.length, 2)
+  assert.ok(defaults.lines.some((l) => l.includes('pid 701') && l.includes('missing after 61s')))
+  assert.ok(defaults.lines.some((l) => l.includes('pid 702') && l.includes('901s silent')))
+
+  const overridden = harness.run(fixture, { WD_AGY_STARTUP_SECS: '62', WD_AGY_SECS: '902' })
+  assert.deepEqual(overridden.lines, [])
+})
+
+test('Antigravity print mode selector distinguishes print and interactive flags across orderings and prompt text', (t) => {
+  const harness = makeHarness(t)
+  const dbPath = (name) => join(harness.agyConvDir, `${name}.db`)
+  const staleMtime = 8_000
+
+  const processes = {
+    // Ordering 1: Interactive mode option occurs first, prompt text mentions print tokens -> EXCLUDED
+    801: processFixture({ comm: 'agy', args: 'agy -i talk about -p now', etime: '20:00', lstart: 'start-801', openFiles: [dbPath('c801')] }),
+    802: processFixture({ comm: 'agy', args: 'agy -i talk about --print now', etime: '20:00', lstart: 'start-802', openFiles: [dbPath('c802')] }),
+    803: processFixture({ comm: 'agy', args: 'agy --prompt-interactive talk about -p now', etime: '20:00', lstart: 'start-803', openFiles: [dbPath('c803')] }),
+    804: processFixture({ comm: 'agy', args: 'agy --prompt-interactive talk about --print now', etime: '20:00', lstart: 'start-804', openFiles: [dbPath('c804')] }),
+    805: processFixture({ comm: 'agy', args: "agy -i 'talk about -p now'", etime: '20:00', lstart: 'start-805', openFiles: [dbPath('c805')] }),
+    806: processFixture({ comm: 'agy', args: "agy --prompt-interactive 'talk about --print now'", etime: '20:00', lstart: 'start-806', openFiles: [dbPath('c806')] }),
+
+    // Ordering 2: Print mode option occurs first, prompt text mentions interactive tokens -> SELECTED
+    811: processFixture({ comm: 'agy', args: 'agy -p talk about -i now', etime: '20:00', lstart: 'start-811', openFiles: [dbPath('c811')] }),
+    812: processFixture({ comm: 'agy', args: 'agy -p talk about --prompt-interactive now', etime: '20:00', lstart: 'start-812', openFiles: [dbPath('c812')] }),
+    813: processFixture({ comm: 'agy', args: 'agy --print talk about -i now', etime: '20:00', lstart: 'start-813', openFiles: [dbPath('c813')] }),
+    814: processFixture({ comm: 'agy', args: 'agy --print talk about --prompt-interactive now', etime: '20:00', lstart: 'start-814', openFiles: [dbPath('c814')] }),
+    815: processFixture({ comm: 'agy', args: "agy -p 'talk about -i now'", etime: '20:00', lstart: 'start-815', openFiles: [dbPath('c815')] }),
+    816: processFixture({ comm: 'agy', args: "agy --print 'talk about --prompt-interactive now'", etime: '20:00', lstart: 'start-816', openFiles: [dbPath('c816')] }),
+  }
+
+  const mtimes = {
+    [dbPath('c801')]: staleMtime,
+    [dbPath('c802')]: staleMtime,
+    [dbPath('c803')]: staleMtime,
+    [dbPath('c804')]: staleMtime,
+    [dbPath('c805')]: staleMtime,
+    [dbPath('c806')]: staleMtime,
+    [dbPath('c811')]: staleMtime,
+    [dbPath('c812')]: staleMtime,
+    [dbPath('c813')]: staleMtime,
+    [dbPath('c814')]: staleMtime,
+    [dbPath('c815')]: staleMtime,
+    [dbPath('c816')]: staleMtime,
+  }
+
+  const { lines } = harness.run({ processes, mtimes }, { WD_AGY_SECS: '900' })
+  const alertedPids = lines.map((l) => l.match(/pid (\d+)/)?.[1]).sort()
+  assert.deepEqual(alertedPids, ['811', '812', '813', '814', '815', '816'])
+  assert.ok(lines.every((l) => l.startsWith('AGY STALL:') && l.includes('own conversation database 2000s silent')))
 })

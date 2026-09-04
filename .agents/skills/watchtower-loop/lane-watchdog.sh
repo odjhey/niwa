@@ -18,13 +18,18 @@
 #   2. alt-seat lanes: CLAUDE_CONFIG_DIR seats buffer stdout, so liveness is
 #      each process's own open session transcript under WD_ALT_HOME. A process
 #      with no attributable transcript is non-conclusive.
-#   3. heartbeat: only when THIS session's transcript is >=30min old.
+#   3. agy lanes: Antigravity print-mode lanes (`agy ... -p/--print`).
+#      Liveness is each process's own open conversation database or wal under
+#      ~/.gemini/antigravity-cli/conversations/. An attributable database missing
+#      after startup threshold (>60s) or silent >15min (>900s) is a stall claim.
+#   4. heartbeat: only when THIS session's transcript is >=30min old.
 #
 # Config (env, all optional):
-#   WD_TRANSCRIPT      this session's transcript (default: newest jsonl in
-#                      ~/.claude/projects/<cwd-slug>/)
-#   WD_ALT_HOME        alt-seat CLAUDE_CONFIG_DIR (default ~/.claude-alt; ADAPT)
-#   WD_CODEX_SECS=900  WD_ALT_SECS=1200  WD_IDLE_SECS=1800
+#   WD_TRANSCRIPT            this session's transcript (default: newest jsonl in
+#                            ~/.claude/projects/<cwd-slug>/)
+#   WD_ALT_HOME              alt-seat CLAUDE_CONFIG_DIR (default ~/.claude-alt; ADAPT)
+#   WD_CODEX_SECS=900        WD_ALT_SECS=1200  WD_IDLE_SECS=1800
+#   WD_AGY_STARTUP_SECS=60   WD_AGY_SECS=900
 # Testability seams (production defaults preserve the persistent monitor):
 #   WD_MAX_ITERATIONS=0 (unbounded)  WD_STATE_DIR=${TMPDIR:-/tmp}
 #   WD_SAMPLE_SECS=60
@@ -35,6 +40,8 @@ ALT_HOME=${WD_ALT_HOME:-$HOME/.claude-alt}
 CODEX_SECS=${WD_CODEX_SECS:-900}
 ALT_SECS=${WD_ALT_SECS:-1200}
 IDLE_SECS=${WD_IDLE_SECS:-1800}
+AGY_STARTUP_SECS=${WD_AGY_STARTUP_SECS:-60}
+AGY_SECS=${WD_AGY_SECS:-900}
 MAX_ITERATIONS=${WD_MAX_ITERATIONS:-0}
 STATE_DIR=${WD_STATE_DIR:-${TMPDIR:-/tmp}}
 SAMPLE_SECS=${WD_SAMPLE_SECS:-60}
@@ -112,25 +119,63 @@ parse_process_time() {
 # Set OWN_PATH and OWN_MTIME to the newest open file owned by pid that matches
 # the requested sensor. lsof's field output preserves whitespace in paths.
 find_newest_own_file() {
-  local pid=$1 sensor=$2 line file_path mtime
+  local pid=$1 sensor=$2 line file_path mtime lsof_output lsof_status stat_status
   local newest=0
   OWN_PATH=''
   OWN_MTIME=''
+  OWN_LOOKUP_OK=0
+  OWN_STAT_OK=1
 
-  while IFS= read -r line; do
-    [[ "$line" == n* ]] || continue
-    file_path=${line#n}
-    case "$sensor" in
-      codex) [[ "$file_path" == *sessions*rollout*.jsonl ]] || continue ;;
-      alt) [[ "$file_path" == "$ALT_HOME"/projects/*/*.jsonl ]] || continue ;;
+  lsof_output=$(lsof -Fn -p "$pid" 2>/dev/null)
+  lsof_status=$?
+  if (( lsof_status == 0 )); then
+    OWN_LOOKUP_OK=1
+    while IFS= read -r line; do
+      [[ "$line" == n* ]] || continue
+      file_path=${line#n}
+      case "$sensor" in
+        codex) [[ "$file_path" == *sessions*rollout*.jsonl ]] || continue ;;
+        alt) [[ "$file_path" == "$ALT_HOME"/projects/*/*.jsonl ]] || continue ;;
+        agy)
+          [[ "$file_path" != *.db-shm ]] || continue
+          [[ "$file_path" != *conversation_summaries.db* ]] || continue
+          [[ "$file_path" != *log* ]] || continue
+          [[ "$file_path" != *stdout* ]] || continue
+          [[ "$file_path" != *stderr* ]] || continue
+          [[ "$file_path" == "$HOME"/.gemini/antigravity-cli/conversations/*.db || "$file_path" == "$HOME"/.gemini/antigravity-cli/conversations/*.db-wal ]] || continue
+          ;;
+      esac
+      mtime=$(stat -f %m "$file_path" 2>/dev/null)
+      stat_status=$?
+      if (( stat_status != 0 )); then
+        OWN_STAT_OK=0
+        continue
+      fi
+      if (( mtime >= newest )); then
+        newest=$mtime
+        OWN_PATH=$file_path
+        OWN_MTIME=$mtime
+      fi
+    done <<< "$lsof_output"
+  fi
+}
+
+# Determine print mode from the first token-delimited mode option among
+# -p, --print, -i, and --prompt-interactive in the flattened argv string.
+# Selects only when that first mode option is -p or --print; fails closed if
+# interactive, absent, or unclassifiable. Prompt text is treated strictly as data.
+agy_is_print_mode() {
+  local raw_args=$1
+  local -a words
+  words=(${=raw_args})
+  local word
+  for word in "${words[@]}"; do
+    case "$word" in
+      -p|--print) return 0 ;;
+      -i|--prompt-interactive) return 1 ;;
     esac
-    mtime=$(stat -f %m "$file_path" 2>/dev/null) || continue
-    if (( mtime >= newest )); then
-      newest=$mtime
-      OWN_PATH=$file_path
-      OWN_MTIME=$mtime
-    fi
-  done < <(lsof -Fn -p "$pid" 2>/dev/null)
+  done
+  return 1
 }
 
 # A start timestamp makes suppression belong to a process incarnation, not a
@@ -181,8 +226,10 @@ while true; do
   alt_n=0
   codex_discovery_ok=0
   alt_discovery_ok=0
+  agy_discovery_ok=0
   codex_observed_markers=()
   alt_observed_markers=()
+  agy_observed_markers=()
 
   sensor_lock_fd=''
   # A positive timeout reports ordinary contention as status 2, distinct from
@@ -290,8 +337,73 @@ while true; do
     fi
   done
 
+  agy_output=$(pgrep -x 'agy' 2>/dev/null)
+  agy_status=$?
+  if (( agy_status == 0 || agy_status == 1 )); then
+    agy_discovery_ok=1
+    agy_pids=("${(@f)agy_output}")
+  else
+    agy_pids=()
+  fi
+  for apid in "${agy_pids[@]}"; do
+    [[ -n "$apid" ]] || continue
+    comm=$(ps -o comm= -p "$apid" 2>/dev/null)
+    comm_status=$?
+    comm=${comm//[[:space:]]/}
+    if (( comm_status != 0 )) || [[ -z "$comm" ]]; then
+      agy_discovery_ok=0
+      continue
+    fi
+    [[ "$comm" == agy ]] || continue
+
+    proc_args=$(ps -o args= -p "$apid" 2>/dev/null)
+    args_status=$?
+    trimmed_args=${proc_args//[[:space:]]/}
+    if (( args_status != 0 )) || [[ -z "$trimmed_args" ]]; then
+      agy_discovery_ok=0
+      continue
+    fi
+    agy_is_print_mode "$proc_args" || continue
+
+    started=$(ps -o lstart= -p "$apid" 2>/dev/null)
+    started_status=$?
+    if (( started_status != 0 )) || [[ -z "$started" ]]; then
+      agy_discovery_ok=0
+      continue
+    fi
+    marker_for_process agy "$apid" "$started"
+    agy_observed_markers+=("$MARKER")
+
+    et=$(ps -o etime= -p "$apid" 2>/dev/null)
+    esec=$(parse_process_time "$et") || continue
+
+    find_newest_own_file "$apid" agy
+    if (( OWN_LOOKUP_OK == 0 || OWN_STAT_OK == 0 )); then
+      agy_discovery_ok=0
+      continue
+    fi
+
+    if [[ -z "$OWN_MTIME" ]]; then
+      if (( esec > AGY_STARTUP_SECS )); then
+        if claim_marker; then
+          print -r -- "AGY STALL: agy pid $apid own conversation database missing after ${esec}s"
+        fi
+      fi
+    else
+      db_age=$(( now - OWN_MTIME ))
+      if (( db_age > AGY_SECS )); then
+        if claim_marker; then
+          print -r -- "AGY STALL: agy pid $apid own conversation database ${db_age}s silent"
+        fi
+      else
+        clear_marker
+      fi
+    fi
+  done
+
   (( codex_discovery_ok )) && cleanup_missing_markers codex "${codex_observed_markers[@]}"
   (( alt_discovery_ok )) && cleanup_missing_markers alt "${alt_observed_markers[@]}"
+  (( agy_discovery_ok )) && cleanup_missing_markers agy "${agy_observed_markers[@]}"
 
   if ! zsystem flock -u "$sensor_lock_fd"; then
     print -u2 -r -- "lane-watchdog: cannot release sensor lock $SENSOR_LOCK_FILE"
