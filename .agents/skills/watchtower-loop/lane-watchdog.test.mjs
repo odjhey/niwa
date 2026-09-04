@@ -1,24 +1,26 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
+  watch,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const watchdog = join(here, 'lane-watchdog.sh')
+const watchdog = resolve(process.env.WD_TEST_WATCHDOG ?? join(here, 'lane-watchdog.sh'))
 
 const fakeCommandSource = `#!${process.execPath}
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename } from 'node:path'
 
 const fixture = JSON.parse(readFileSync(process.env.WD_TEST_FIXTURE, 'utf8'))
@@ -32,15 +34,29 @@ if (command === 'date') {
   print(fixture.now)
 } else if (command === 'pgrep') {
   let pids = []
+  let sensor
   if (args.length === 2 && args[0] === '-f' && args[1] === 'codex exec') {
+    sensor = 'codex'
     pids = fixture.codexPids
   } else if (args.length === 2 && args[0] === '-x' && args[1] === 'claude') {
+    sensor = 'alt'
     pids = Object.entries(fixture.processes)
       .filter(([, proc]) => proc.comm === 'claude')
       .map(([pid]) => pid)
+  } else {
+    process.exitCode = 64
   }
-  if (pids.length) print(pids.join('\\n'))
-  else process.exitCode = 1
+  if (sensor && fixture.blockPgrep === sensor) {
+    writeFileSync(fixture.blockReadyPath, sensor)
+    readFileSync(0)
+  }
+  if (sensor && fixture.pgrepStatus?.[sensor] !== undefined) {
+    process.exitCode = fixture.pgrepStatus[sensor]
+  } else if (pids.length) {
+    print(pids.join('\\n'))
+  } else if (sensor) {
+    process.exitCode = 1
+  }
 } else if (command === 'ps') {
   const field = args[args.indexOf('-o') + 1].replace(/=$/, '')
   const pid = args[args.indexOf('-p') + 1]
@@ -48,17 +64,23 @@ if (command === 'date') {
   if (!proc || proc[field] === undefined) process.exitCode = 1
   else print(proc[field])
 } else if (command === 'lsof') {
-  const pid = args[args.indexOf('-p') + 1]
+  const pid = args[2]
   const proc = fixture.processes[pid]
-  if (!proc) process.exitCode = 1
-  else {
+  if (args.length !== 3 || args[0] !== '-Fn' || args[1] !== '-p' || !proc) {
+    process.exitCode = 1
+  } else {
     print('p' + pid)
     for (const path of proc.openFiles ?? []) print('n' + path)
   }
 } else if (command === 'stat') {
   const path = args.at(-1)
   if (fixture.mtimes[path] === undefined) process.exitCode = 1
-  else print(fixture.mtimes[path])
+  else {
+    print(fixture.mtimes[path])
+    if (fixture.removeSensorLockAfterTranscriptStat && path === process.env.WD_TRANSCRIPT) {
+      rmSync(process.env.WD_STATE_DIR + '/.wd-sensors.lock')
+    }
+  }
 } else if (command === 'sleep') {
   appendFileSync(process.env.WD_TEST_SLEEP_LOG, args.join(' ') + '\\n')
 } else {
@@ -86,7 +108,7 @@ function makeHarness(t) {
   }
   t.after(() => rmSync(root, { recursive: true, force: true }))
 
-  function run(fixture, env = {}) {
+  function writeFixture(fixture) {
     const normalized = {
       now: 10_000,
       codexPids: [],
@@ -96,31 +118,137 @@ function makeHarness(t) {
     }
     normalized.mtimes = { [transcript]: normalized.now, ...normalized.mtimes }
     writeFileSync(fixturePath, JSON.stringify(normalized))
+  }
+
+  function watchdogEnv(env = {}) {
+    return {
+      ...process.env,
+      HOME: root,
+      PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      ZDOTDIR: root,
+      WD_ALT_HOME: altHome,
+      WD_MAX_ITERATIONS: '1',
+      WD_STATE_DIR: stateDir,
+      WD_TEST_FIXTURE: fixturePath,
+      WD_TEST_SLEEP_LOG: sleepLog,
+      WD_TRANSCRIPT: transcript,
+      ...env,
+    }
+  }
+
+  function runRaw(fixture, env = {}) {
+    writeFixture(fixture)
     writeFileSync(sleepLog, '')
     const result = spawnSync('/bin/zsh', [watchdog], {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        HOME: root,
-        PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
-        ZDOTDIR: root,
-        WD_ALT_HOME: altHome,
-        WD_MAX_ITERATIONS: '1',
-        WD_STATE_DIR: stateDir,
-        WD_TEST_FIXTURE: fixturePath,
-        WD_TEST_SLEEP_LOG: sleepLog,
-        WD_TRANSCRIPT: transcript,
-        ...env,
-      },
+      env: watchdogEnv(env),
     })
-    assert.equal(result.status, 0, `watchdog failed:\n${result.stderr}`)
     return {
+      ...result,
       lines: result.stdout.trim() ? result.stdout.trim().split('\n') : [],
       sleeps: readFileSync(sleepLog, 'utf8').trim().split('\n').filter(Boolean),
     }
   }
 
-  return { altHome, run, stateDir, transcript }
+  function run(fixture, env = {}) {
+    const result = runRaw(fixture, env)
+    assert.equal(result.status, 0, `watchdog failed:\n${result.stderr}`)
+    return result
+  }
+
+  function spawnRun(fixture, env = {}) {
+    let readyWatcher
+    let blockedResolve
+    const blocked = new Promise((resolve) => {
+      blockedResolve = resolve
+      if (fixture.blockReadyPath) {
+        readyWatcher = watch(dirname(fixture.blockReadyPath), (_event, filename) => {
+          if (String(filename) === basename(fixture.blockReadyPath)) {
+            readyWatcher.close()
+            readyWatcher = undefined
+            resolve()
+          }
+        })
+      }
+    })
+    writeFixture(fixture)
+    writeFileSync(sleepLog, '')
+    const child = spawn('/bin/zsh', [watchdog], { env: watchdogEnv(env) })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    const completed = new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', (status, signal) => {
+        if (readyWatcher) readyWatcher.close()
+        if (!fixture.blockReadyPath) blockedResolve()
+        resolve({
+          lines: stdout.trim() ? stdout.trim().split('\n') : [],
+          signal,
+          status,
+          stderr,
+        })
+      })
+    })
+    return { blocked, child, completed }
+  }
+
+  function invokeLsof(args, fixture) {
+    writeFixture(fixture)
+    return spawnSync(join(bin, 'lsof'), args, {
+      encoding: 'utf8',
+      env: { ...process.env, WD_TEST_FIXTURE: fixturePath },
+    })
+  }
+
+  function markers(sensor) {
+    return readdirSync(stateDir).filter((name) => name.startsWith(`.wd-${sensor}-`)).sort()
+  }
+
+  return { altHome, invokeLsof, markers, run, runRaw, spawnRun, stateDir, transcript }
+}
+
+function holdSensorLock(lockFile) {
+  const holderScript = `
+    zmodload zsh/system || exit 70
+    : >> "$1" || exit 71
+    zsystem flock -f lock_fd "$1" || exit 72
+    print -r -- LOCK_READY
+    IFS= read -r _
+    zsystem flock -u "$lock_fd" || exit 73
+  `
+  const child = spawn('/bin/zsh', ['-fc', holderScript, 'lock-holder', lockFile])
+  let stdout = ''
+  let stderr = ''
+  let readyResolve
+  let readyReject
+  const ready = new Promise((resolve, reject) => {
+    readyResolve = resolve
+    readyReject = reject
+  })
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk
+    if (stdout.includes('LOCK_READY')) readyResolve()
+  })
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  const completed = new Promise((resolve, reject) => {
+    child.once('error', (error) => {
+      readyReject(error)
+      reject(error)
+    })
+    child.once('close', (status, signal) => {
+      if (!stdout.includes('LOCK_READY')) {
+        readyReject(new Error(`lock holder exited before ready: status=${status} signal=${signal} stderr=${stderr}`))
+      }
+      resolve({ signal, status, stderr })
+    })
+  })
+  async function release() {
+    if (!child.stdin.writableEnded) child.stdin.end('release\n')
+    return completed
+  }
+  return { child, completed, ready, release }
 }
 
 function processFixture({
@@ -133,6 +261,137 @@ function processFixture({
 }) {
   return { argv, comm, cputime, etime, lstart, openFiles }
 }
+
+test('fake lsof accepts only -Fn -p followed by a known fixture PID', (t) => {
+  const harness = makeHarness(t)
+  const fixture = {
+    processes: {
+      601: processFixture({ comm: 'codex', lstart: 'known process' }),
+    },
+  }
+
+  const accepted = harness.invokeLsof(['-Fn', '-p', '601'], fixture)
+  assert.equal(accepted.status, 0)
+  assert.equal(accepted.stdout, 'p601\n')
+
+  for (const args of [
+    ['-p', '601'],
+    ['-p', '601', '-Fn'],
+    ['-Fn'],
+    ['-Fn', '-p'],
+    ['-Fn', '-p', '601', 'extra'],
+    ['-Fn', '-p', '999'],
+  ]) {
+    const rejected = harness.invokeLsof(args, fixture)
+    assert.notEqual(rejected.status, 0, `unexpectedly accepted ${JSON.stringify(args)}`)
+    assert.equal(rejected.stdout, '')
+  }
+})
+
+test('sensor lock creation failure is an explicit startup error', async (t) => {
+  const harness = makeHarness(t)
+  const missingStateDir = join(harness.stateDir, 'missing parent', 'missing state')
+  const run = harness.spawnRun({}, { WD_STATE_DIR: missingStateDir })
+  t.after(() => {
+    if (!run.child.stdin.writableEnded) run.child.stdin.end()
+    return run.completed
+  })
+  run.child.stdin.end()
+  const result = await run.completed
+
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /lane-watchdog: cannot create sensor lock /)
+})
+
+test('runtime lock disappearance before acquisition fails explicitly', (t) => {
+  const harness = makeHarness(t)
+  const result = harness.runRaw({ removeSensorLockAfterTranscriptStat: true })
+
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /lane-watchdog: cannot acquire sensor lock /)
+  assert.equal(readdirSync(harness.stateDir).includes('.wd-sensors.lock'), false)
+})
+
+test('a busy sensor lock preserves markers while heartbeat remains active', { timeout: 10_000 }, async (t) => {
+  const harness = makeHarness(t)
+  const lockFile = join(harness.stateDir, '.wd-sensors.lock')
+  const codexMarker = '.wd-codex-901-held_incarnation'
+  const altMarker = '.wd-alt-902-held_incarnation'
+  writeFileSync(join(harness.stateDir, codexMarker), 'codex sentinel')
+  writeFileSync(join(harness.stateDir, altMarker), 'alt sentinel')
+
+  const holder = holdSensorLock(lockFile)
+  t.after(() => holder.release())
+  await holder.ready
+
+  const result = harness.run(
+    {
+      now: 10_000,
+      codexPids: ['901'],
+      processes: {
+        901: processFixture({ comm: 'codex', lstart: 'new codex incarnation' }),
+        902: processFixture({ comm: 'claude', lstart: 'new alt incarnation' }),
+      },
+      mtimes: { [harness.transcript]: 8_000 },
+    },
+    { WD_IDLE_SECS: '100' },
+  )
+
+  assert.deepEqual(result.lines, ['HEARTBEAT: idle 33min, codex=1 alt=0 — board check due'])
+  assert.equal(result.stderr, '')
+  assert.deepEqual(harness.markers('codex'), [codexMarker])
+  assert.deepEqual(harness.markers('alt'), [altMarker])
+  assert.equal(readFileSync(join(harness.stateDir, codexMarker), 'utf8'), 'codex sentinel')
+  assert.equal(readFileSync(join(harness.stateDir, altMarker), 'utf8'), 'alt sentinel')
+  assert.ok(readdirSync(harness.stateDir).includes('.wd-sensors.lock'))
+
+  const released = await holder.release()
+  assert.equal(released.status, 0, released.stderr)
+})
+
+test('cooperating watchdogs serialize one first marker claim', { timeout: 10_000 }, async (t) => {
+  const harness = makeHarness(t)
+  const rollout = join(harness.stateDir, 'sessions', 'concurrent rollout.jsonl')
+  const fixture = {
+    blockPgrep: 'codex',
+    blockReadyPath: join(harness.stateDir, 'first-watchdog-holds-lock'),
+    codexPids: ['903'],
+    processes: {
+      903: processFixture({ comm: 'codex', lstart: 'shared incarnation', openFiles: [rollout] }),
+    },
+    mtimes: { [rollout]: 9_899 },
+  }
+  const env = { WD_CODEX_SECS: '100' }
+
+  const first = harness.spawnRun(fixture, env)
+  t.after(() => {
+    if (!first.child.stdin.writableEnded) first.child.stdin.end()
+    return first.completed
+  })
+  await first.blocked
+
+  const second = harness.spawnRun(fixture, env)
+  t.after(() => {
+    if (!second.child.stdin.writableEnded) second.child.stdin.end()
+    return second.completed
+  })
+  second.child.stdin.end()
+  const secondResult = await second.completed
+  assert.equal(secondResult.status, 0, secondResult.stderr)
+  assert.equal(secondResult.stderr, '')
+  assert.deepEqual(secondResult.lines, [])
+  assert.deepEqual(harness.markers('codex'), [])
+
+  first.child.stdin.end()
+  const firstResult = await first.completed
+  assert.equal(firstResult.status, 0, firstResult.stderr)
+  assert.equal(firstResult.stderr, '')
+  const combinedAlerts = [...firstResult.lines, ...secondResult.lines]
+  assert.equal(combinedAlerts.length, 1)
+  assert.match(combinedAlerts[0], /STALL: codex pid 903 /)
+  assert.equal(harness.markers('codex').length, 1)
+})
 
 test('Codex freshness is process-owned across concurrent lanes', (t) => {
   const harness = makeHarness(t)
@@ -278,6 +537,26 @@ test('Claude discovery does not depend on alternate-home text in argv and eviden
   assert.match(lines[0], /own transcript 1201s silent/)
 })
 
+test('repeated marker claim emits one alert and no stderr', (t) => {
+  const harness = makeHarness(t)
+  const rollout = join(harness.stateDir, 'sessions', 'repeated claim rollout.jsonl')
+  const fixture = {
+    codexPids: ['304'],
+    processes: {
+      304: processFixture({ comm: 'codex', lstart: 'repeated claim incarnation', openFiles: [rollout] }),
+    },
+    mtimes: { [rollout]: 9_899 },
+  }
+  const env = { WD_CODEX_SECS: '100' }
+
+  const first = harness.run(fixture, env)
+  const second = harness.run(fixture, env)
+  assert.equal([...first.lines, ...second.lines].length, 1)
+  assert.match(first.lines[0], /STALL: codex pid 304 /)
+  assert.equal(first.stderr, '')
+  assert.equal(second.stderr, '')
+})
+
 test('Codex suppression resets on recovery and does not cross PID reuse', (t) => {
   const harness = makeHarness(t)
   const rollout = join(harness.stateDir, 'sessions', 'codex rollout.jsonl')
@@ -312,7 +591,203 @@ test('alternate-Claude suppression resets on recovery and does not cross PID reu
   assert.deepEqual(harness.run(fixture(9_899), env).lines, [])
   assert.deepEqual(harness.run(fixture(9_950), env).lines, [])
   assert.equal(harness.run(fixture(9_899), env).lines.length, 1)
+  const firstMarker = harness.markers('alt')
+  assert.equal(firstMarker.length, 1)
   assert.equal(harness.run(fixture(9_899, 'second incarnation'), env).lines.length, 1)
+  assert.equal(harness.markers('alt').length, 1)
+  assert.notDeepEqual(harness.markers('alt'), firstMarker)
+})
+
+test('cleanup removes a disappeared Codex marker while preserving a live suspect sibling', (t) => {
+  const harness = makeHarness(t)
+  const firstRollout = join(harness.stateDir, 'sessions', 'first cleanup rollout.jsonl')
+  const siblingRollout = join(harness.stateDir, 'sessions', 'sibling cleanup rollout.jsonl')
+  const env = { WD_CODEX_SECS: '100' }
+  const processes = {
+    310: processFixture({ comm: 'codex', lstart: 'cleanup first', openFiles: [firstRollout] }),
+    311: processFixture({ comm: 'codex', lstart: 'cleanup sibling', openFiles: [siblingRollout] }),
+  }
+
+  assert.equal(
+    harness.run(
+      {
+        codexPids: ['310', '311'],
+        processes,
+        mtimes: { [firstRollout]: 9_899, [siblingRollout]: 9_899 },
+      },
+      env,
+    ).lines.length,
+    2,
+  )
+  assert.equal(harness.markers('codex').length, 2)
+
+  assert.deepEqual(
+    harness.run(
+      {
+        codexPids: ['311'],
+        processes: { 311: processes[311] },
+        mtimes: { [siblingRollout]: 9_899 },
+      },
+      env,
+    ).lines,
+    [],
+  )
+  assert.equal(harness.markers('codex').length, 1)
+  assert.match(harness.markers('codex')[0], /-311-/)
+})
+
+test('an unattributable live Claude incarnation keeps its marker until it disappears', (t) => {
+  const harness = makeHarness(t)
+  const transcript = join(harness.altHome, 'projects', 'cleanup project', 'session.jsonl')
+  const suspect = {
+    processes: {
+      410: processFixture({ comm: 'claude', lstart: 'live unattributable', openFiles: [transcript] }),
+    },
+    mtimes: { [transcript]: 9_899 },
+  }
+  const env = { WD_ALT_SECS: '100' }
+
+  assert.equal(harness.run(suspect, env).lines.length, 1)
+  const marker = harness.markers('alt')
+  assert.equal(marker.length, 1)
+
+  assert.deepEqual(
+    harness.run(
+      {
+        processes: {
+          410: processFixture({ comm: 'claude', lstart: 'live unattributable' }),
+        },
+      },
+      env,
+    ).lines,
+    [],
+  )
+  assert.deepEqual(harness.markers('alt'), marker)
+
+  harness.run({}, env)
+  assert.deepEqual(harness.markers('alt'), [])
+})
+
+test('missing lstart fails cleanup closed for both sensors until conclusive disappearance', (t) => {
+  const harness = makeHarness(t)
+  const codexRollout = join(harness.stateDir, 'sessions', 'missing lstart codex.jsonl')
+  const altTranscript = join(harness.altHome, 'projects', 'missing lstart project', 'alt.jsonl')
+  const env = { WD_CODEX_SECS: '100', WD_ALT_SECS: '100' }
+
+  assert.equal(
+    harness.run(
+      {
+        codexPids: ['330'],
+        processes: {
+          330: processFixture({ comm: 'codex', lstart: 'stable codex start', openFiles: [codexRollout] }),
+          430: processFixture({ comm: 'claude', lstart: 'stable alt start', openFiles: [altTranscript] }),
+        },
+        mtimes: { [codexRollout]: 9_899, [altTranscript]: 9_899 },
+      },
+      env,
+    ).lines.length,
+    2,
+  )
+  const codexMarker = harness.markers('codex')
+  const altMarker = harness.markers('alt')
+
+  assert.deepEqual(
+    harness.run(
+      {
+        codexPids: ['330'],
+        processes: {
+          330: processFixture({ comm: 'codex', lstart: '', openFiles: [codexRollout] }),
+          430: processFixture({ comm: 'claude', openFiles: [altTranscript] }),
+        },
+        mtimes: { [codexRollout]: 9_899, [altTranscript]: 9_899 },
+      },
+      env,
+    ).lines,
+    [],
+  )
+  assert.deepEqual(harness.markers('codex'), codexMarker)
+  assert.deepEqual(harness.markers('alt'), altMarker)
+
+  harness.run({}, env)
+  assert.deepEqual(harness.markers('codex'), [])
+  assert.deepEqual(harness.markers('alt'), [])
+})
+
+test('failed comm lookup blocks only its sensor cleanup', (t) => {
+  const harness = makeHarness(t)
+  const codexRollout = join(harness.stateDir, 'sessions', 'missing comm codex.jsonl')
+  const altTranscript = join(harness.altHome, 'projects', 'missing comm project', 'alt.jsonl')
+  const env = { WD_CODEX_SECS: '100', WD_ALT_SECS: '100' }
+
+  assert.equal(
+    harness.run(
+      {
+        codexPids: ['340'],
+        processes: {
+          340: processFixture({ comm: 'codex', lstart: 'stable comm codex', openFiles: [codexRollout] }),
+          440: processFixture({ comm: 'claude', lstart: 'stable comm alt', openFiles: [altTranscript] }),
+        },
+        mtimes: { [codexRollout]: 9_899, [altTranscript]: 9_899 },
+      },
+      env,
+    ).lines.length,
+    2,
+  )
+  const codexMarker = harness.markers('codex')
+
+  harness.run(
+    {
+      codexPids: ['340'],
+      processes: {
+        340: processFixture({ lstart: 'stable comm codex', openFiles: [codexRollout] }),
+      },
+      mtimes: { [codexRollout]: 9_899 },
+    },
+    env,
+  )
+  assert.deepEqual(harness.markers('codex'), codexMarker)
+  assert.deepEqual(harness.markers('alt'), [])
+
+  harness.run(
+    {
+      codexPids: ['341'],
+      processes: {
+        341: processFixture({ comm: 'not-codex', lstart: 'excluded executable' }),
+      },
+    },
+    env,
+  )
+  assert.deepEqual(harness.markers('codex'), [])
+})
+
+test('candidate-discovery errors fail closed for only the affected sensor', (t) => {
+  const harness = makeHarness(t)
+  const codexRollout = join(harness.stateDir, 'sessions', 'discovery codex.jsonl')
+  const altTranscript = join(harness.altHome, 'projects', 'discovery project', 'alt.jsonl')
+  const env = { WD_CODEX_SECS: '100', WD_ALT_SECS: '100' }
+
+  assert.equal(
+    harness.run(
+      {
+        codexPids: ['320'],
+        processes: {
+          320: processFixture({ comm: 'codex', lstart: 'discovery codex', openFiles: [codexRollout] }),
+          420: processFixture({ comm: 'claude', lstart: 'discovery alt', openFiles: [altTranscript] }),
+        },
+        mtimes: { [codexRollout]: 9_899, [altTranscript]: 9_899 },
+      },
+      env,
+    ).lines.length,
+    2,
+  )
+  assert.equal(harness.markers('codex').length, 1)
+  assert.equal(harness.markers('alt').length, 1)
+  writeFileSync(join(harness.stateDir, 'unrelated-state'), 'keep')
+
+  harness.run({ pgrepStatus: { codex: 2 } }, env)
+  assert.equal(harness.markers('codex').length, 1)
+  assert.deepEqual(harness.markers('alt'), [])
+  assert.equal(readFileSync(join(harness.stateDir, 'unrelated-state'), 'utf8'), 'keep')
 })
 
 test('production defaults and existing threshold overrides remain effective', (t) => {

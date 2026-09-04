@@ -38,7 +38,21 @@ IDLE_SECS=${WD_IDLE_SECS:-1800}
 MAX_ITERATIONS=${WD_MAX_ITERATIONS:-0}
 STATE_DIR=${WD_STATE_DIR:-${TMPDIR:-/tmp}}
 SAMPLE_SECS=${WD_SAMPLE_SECS:-60}
+SENSOR_LOCK_FILE="$STATE_DIR/.wd-sensors.lock"
 iteration=0
+
+zmodload zsh/system || {
+  print -u2 -r -- "lane-watchdog: zsh/system is required for sensor locking"
+  exit 1
+}
+zsystem supports flock || {
+  print -u2 -r -- "lane-watchdog: zsystem flock is not supported"
+  exit 1
+}
+: >> "$SENSOR_LOCK_FILE" || {
+  print -u2 -r -- "lane-watchdog: cannot create sensor lock $SENSOR_LOCK_FILE"
+  exit 1
+}
 
 # macOS ps emits elapsed and CPU time as mm:ss, hh:mm:ss, or dd-hh:mm:ss;
 # CPU seconds can include a fractional suffix (for example, 0:00.01).
@@ -134,22 +148,76 @@ clear_marker() {
   [[ -n "$MARKER" ]] && rm -f -- "$MARKER"
 }
 
+# Claim a new suspect episode atomically. The shared sensor lock serializes
+# cooperating watchdogs; noclobber also makes the marker creation itself safe.
+claim_marker() {
+  setopt localoptions noclobber
+  { : > "$MARKER" } 2>/dev/null
+}
+
+# Remove suppression state only after candidate discovery completed
+# successfully. The observed paths are exact process-incarnation identities.
+cleanup_missing_markers() {
+  local sensor=$1 candidate observed found
+  shift
+  local -a observed_markers=("$@")
+
+  for candidate in "$STATE_DIR"/.wd-"$sensor"-*(N); do
+    found=0
+    for observed in "${observed_markers[@]}"; do
+      if [[ "$candidate" == "$observed" ]]; then
+        found=1
+        break
+      fi
+    done
+    (( found )) || rm -f -- "$candidate"
+  done
+}
+
 while true; do
   now=$(date +%s)
   transcript_mtime=$(stat -f %m "$TRANSCRIPT" 2>/dev/null || print -r -- "$now")
   idle_age=$(( now - transcript_mtime ))
   alt_n=0
+  codex_discovery_ok=0
+  alt_discovery_ok=0
+  codex_observed_markers=()
+  alt_observed_markers=()
 
-  codex_pids=("${(@f)$(pgrep -f 'codex exec' 2>/dev/null)}")
+  sensor_lock_fd=''
+  # A positive timeout reports ordinary contention as status 2, distinct from
+  # status 1 when the lock path cannot be opened.
+  zsystem flock -t 0.001 -i 0.001 -f sensor_lock_fd "$SENSOR_LOCK_FILE" 2>/dev/null
+  sensor_lock_status=$?
+  if (( sensor_lock_status == 0 )); then
+
+  codex_output=$(pgrep -f 'codex exec' 2>/dev/null)
+  codex_status=$?
+  if (( codex_status == 0 || codex_status == 1 )); then
+    codex_discovery_ok=1
+    codex_pids=("${(@f)codex_output}")
+  else
+    codex_pids=()
+  fi
   for cpid in "${codex_pids[@]}"; do
     [[ -n "$cpid" ]] || continue
     comm=$(ps -o comm= -p "$cpid" 2>/dev/null)
+    comm_status=$?
     comm=${comm//[[:space:]]/}
+    if (( comm_status != 0 )) || [[ -z "$comm" ]]; then
+      codex_discovery_ok=0
+      continue
+    fi
     [[ "$comm" == codex ]] || continue
 
     started=$(ps -o lstart= -p "$cpid" 2>/dev/null)
-    [[ -n "$started" ]] || continue
+    started_status=$?
+    if (( started_status != 0 )) || [[ -z "$started" ]]; then
+      codex_discovery_ok=0
+      continue
+    fi
     marker_for_process codex "$cpid" "$started"
+    codex_observed_markers+=("$MARKER")
 
     et=$(ps -o etime= -p "$cpid" 2>/dev/null)
     ct=$(ps -o cputime= -p "$cpid" 2>/dev/null)
@@ -168,9 +236,8 @@ while true; do
         fi
         rollout_status="${roage}s silent"
       fi
-      if [[ ! -f "$MARKER" ]]; then
+      if claim_marker; then
         print -r -- "STALL: codex pid $cpid alive ${esec}s, ${csec}s CPU, own rollout $rollout_status — hung (verify tee/-o target before killing)"
-        : > "$MARKER"
       fi
     else
       clear_marker
@@ -180,17 +247,34 @@ while true; do
   # Discover Claude executables without relying on CLAUDE_CONFIG_DIR being in
   # argv. Each PID becomes an alternate lane only when its own lsof evidence
   # identifies an open transcript under ALT_HOME.
-  alt_pids=("${(@f)$(pgrep -x 'claude' 2>/dev/null)}")
+  alt_output=$(pgrep -x 'claude' 2>/dev/null)
+  alt_status=$?
+  if (( alt_status == 0 || alt_status == 1 )); then
+    alt_discovery_ok=1
+    alt_pids=("${(@f)alt_output}")
+  else
+    alt_pids=()
+  fi
   for apid in "${alt_pids[@]}"; do
     [[ -n "$apid" ]] || continue
     comm=$(ps -o comm= -p "$apid" 2>/dev/null)
+    comm_status=$?
     comm=${comm//[[:space:]]/}
+    if (( comm_status != 0 )) || [[ -z "$comm" ]]; then
+      alt_discovery_ok=0
+      continue
+    fi
     [[ "$comm" == claude ]] || continue
     (( alt_n++ ))
 
     started=$(ps -o lstart= -p "$apid" 2>/dev/null)
-    [[ -n "$started" ]] || continue
+    started_status=$?
+    if (( started_status != 0 )) || [[ -z "$started" ]]; then
+      alt_discovery_ok=0
+      continue
+    fi
     marker_for_process alt "$apid" "$started"
+    alt_observed_markers+=("$MARKER")
     find_newest_own_file "$apid" alt
     # No process-owned transcript means this sensor has no conclusion. Do not
     # borrow a sibling/global transcript and do not manufacture a recovery.
@@ -198,14 +282,25 @@ while true; do
 
     lage=$(( now - OWN_MTIME ))
     if (( lage > ALT_SECS )); then
-      if [[ ! -f "$MARKER" ]]; then
+      if claim_marker; then
         print -r -- "ALT-SEAT STALL: claude pid $apid alive, own transcript ${lage}s silent"
-        : > "$MARKER"
       fi
     else
       clear_marker
     fi
   done
+
+  (( codex_discovery_ok )) && cleanup_missing_markers codex "${codex_observed_markers[@]}"
+  (( alt_discovery_ok )) && cleanup_missing_markers alt "${alt_observed_markers[@]}"
+
+  if ! zsystem flock -u "$sensor_lock_fd"; then
+    print -u2 -r -- "lane-watchdog: cannot release sensor lock $SENSOR_LOCK_FILE"
+    exit 1
+  fi
+  elif (( sensor_lock_status != 2 )); then
+    print -u2 -r -- "lane-watchdog: cannot acquire sensor lock $SENSOR_LOCK_FILE"
+    exit 1
+  fi
 
   heartbeat_delay=0
   if [[ -n "$TRANSCRIPT" ]] && (( idle_age >= IDLE_SECS )); then
