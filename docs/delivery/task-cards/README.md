@@ -22,4 +22,4 @@ exists only for repos without a live-state home.
 | `TASK-001` | [Repair lane-watchdog attribution and testability](TASK-001.md) | merged |
 | `TASK-002` | [Harden watchdog command contracts and marker cleanup](TASK-002.md) | abandoned |
 | `TASK-003` | [Complete watchdog state synchronization](TASK-003.md) | merged |
-| `TASK-004` | [Document script usage](TASK-004.md) | draft |
+| `TASK-004` | [Document script usage](TASK-004.md) | merged |

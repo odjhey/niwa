@@ -1,7 +1,7 @@
 ---
 id: TASK-004
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Add a concise repository README explaining how to run and interpret the maintained scripts.'
 provenance: 'Operator request, 2026-09-04'
