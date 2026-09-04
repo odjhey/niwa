@@ -56,6 +56,14 @@ function main() {
   )
   if (tests.error || tests.status !== 0) fail = true
 
+  // --- lane watchdog regression suite
+  const watchdogTests = spawnSync(
+    process.execPath,
+    ['--test', join(root, '.agents', 'skills', 'watchtower-loop', 'lane-watchdog.test.mjs')],
+    { cwd: root, stdio: 'inherit' },
+  )
+  if (watchdogTests.error || watchdogTests.status !== 0) fail = true
+
   // --- copyto manifest stays complete (starter repo only)
   if (!runManifestCheck()) fail = true
 

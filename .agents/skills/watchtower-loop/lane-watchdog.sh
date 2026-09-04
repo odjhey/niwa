@@ -1,79 +1,223 @@
 #!/bin/zsh
 # Lane watchdog — supervises external seat lanes and nudges an idle watchtower.
-# Durable home: .agents/skills/watchtower-loop/lane-watchdog.sh (v9, from the
-# originating repo's 2026-09-03 dogfood; keep incident history in
-# SEAT-RELIABILITY). macOS/zsh: uses `stat -f %m`, `lsof`, `pgrep`;
-# ADAPT `stat` for GNU coreutils (`stat -c %Y`).
+# Durable home: .agents/skills/watchtower-loop/lane-watchdog.sh. macOS/zsh:
+# uses `stat -f %m`, `lsof`, `pgrep`; ADAPT `stat` for GNU coreutils
+# (`stat -c %Y`).
 #
 # Arm it as a persistent Monitor (or equivalent harness watch) whose stdout
 # lines become notifications:
 #   Monitor: command=<this file>, persistent=true
 #
-# Sensors (every 60s; each alert once per episode; all session-attributed):
+# Sensors (every 60s; each alert once per process incarnation and suspect
+# episode; all session-attributed):
 #   1. codex lanes: any `codex exec` process alive >15min with <2s CPU AND
-#      whose OWN open rollout file (found via lsof, per-lane) is silent
-#      >15min is a startup hang. Per-process CPU alone false-positives on
-#      healthy network-bound lanes (high-effort runs idle the CPU during
-#      long API streams — observed 2026-09-03, lane was writing its rollout
-#      3s before the flag); global rollout mtime alone masks a stalled
-#      sibling. Both signals, per-lane, or no flag.
+#      whose OWN open rollout file (found via lsof, per-lane) is missing or
+#      silent >15min is a startup hang claim. Per-process CPU alone
+#      false-positives on healthy network-bound lanes; global rollout mtime
+#      masks a stalled sibling. Both signals, per-lane, or no flag.
 #   2. alt-seat lanes: CLAUDE_CONFIG_DIR seats buffer stdout, so liveness is
-#      the seat's own session-transcript mtime, silent >20min = stall.
-#   3. heartbeat: only when THIS session's transcript is >=30min old — the
-#      transcript is written on every watchtower action, so this fires only
-#      while genuinely idle; never while busy.
+#      each process's own open session transcript under WD_ALT_HOME. A process
+#      with no attributable transcript is non-conclusive.
+#   3. heartbeat: only when THIS session's transcript is >=30min old.
 #
 # Config (env, all optional):
 #   WD_TRANSCRIPT      this session's transcript (default: newest jsonl in
 #                      ~/.claude/projects/<cwd-slug>/)
 #   WD_ALT_HOME        alt-seat CLAUDE_CONFIG_DIR (default ~/.claude-alt; ADAPT)
 #   WD_CODEX_SECS=900  WD_ALT_SECS=1200  WD_IDLE_SECS=1800
+# Testability seams (production defaults preserve the persistent monitor):
+#   WD_MAX_ITERATIONS=0 (unbounded)  WD_STATE_DIR=${TMPDIR:-/tmp}
+#   WD_SAMPLE_SECS=60
 
 slug=$(pwd | tr '/' '-')
 TRANSCRIPT=${WD_TRANSCRIPT:-$(ls -t ~/.claude/projects/$slug/*.jsonl 2>/dev/null | head -1)}
 ALT_HOME=${WD_ALT_HOME:-$HOME/.claude-alt}
-CODEX_SECS=${WD_CODEX_SECS:-900}; ALT_SECS=${WD_ALT_SECS:-1200}; IDLE_SECS=${WD_IDLE_SECS:-1800}
-alt_flagged=0
+CODEX_SECS=${WD_CODEX_SECS:-900}
+ALT_SECS=${WD_ALT_SECS:-1200}
+IDLE_SECS=${WD_IDLE_SECS:-1800}
+MAX_ITERATIONS=${WD_MAX_ITERATIONS:-0}
+STATE_DIR=${WD_STATE_DIR:-${TMPDIR:-/tmp}}
+SAMPLE_SECS=${WD_SAMPLE_SECS:-60}
+iteration=0
+
+# macOS ps emits elapsed and CPU time as mm:ss, hh:mm:ss, or dd-hh:mm:ss;
+# CPU seconds can include a fractional suffix (for example, 0:00.01).
+parse_process_time() {
+  local value=$1 days=0 has_days=0 hours=0 minutes
+  local whole_seconds fraction seconds_value total index
+  local hour_value minute_value second_value
+  local -a fields
+
+  # ps right-aligns fields; accept surrounding whitespace but reject embedded
+  # whitespace because it is not part of any supported shape.
+  while [[ "$value" == [[:space:]]* ]]; do value=${value#?}; done
+  while [[ "$value" == *[[:space:]] ]]; do value=${value%?}; done
+  [[ -n "$value" && "$value" != *[[:space:]]* ]] || return 1
+
+  if [[ "$value" == *-* ]]; then
+    days=${value%%-*}
+    value=${value#*-}
+    has_days=1
+    [[ "$days" == <-> && "$value" != *-* ]] || return 1
+  fi
+  fields=("${(@s/:/)value}")
+  if (( has_days )); then
+    (( ${#fields} == 3 )) || return 1
+  else
+    (( ${#fields} == 2 || ${#fields} == 3 )) || return 1
+  fi
+  for (( index = 1; index < ${#fields}; index++ )); do
+    [[ "${fields[$index]}" == <-> ]] || return 1
+  done
+
+  whole_seconds=${fields[-1]%%.*}
+  [[ "$whole_seconds" == <-> ]] || return 1
+  if [[ "${fields[-1]}" == *.* ]]; then
+    fraction=${fields[-1]#*.}
+    [[ "$fraction" == <-> ]] || return 1
+  fi
+
+  if (( ${#fields} == 2 )); then
+    minutes=${fields[1]}
+  else
+    hours=${fields[1]}
+    minutes=${fields[2]}
+  fi
+  hour_value=$(( 10#$hours ))
+  minute_value=$(( 10#$minutes ))
+  second_value=$(( 10#$whole_seconds ))
+  (( minute_value <= 59 && second_value <= 59 )) || return 1
+  (( ${#fields} == 2 || hour_value <= 23 )) || return 1
+
+  seconds_value=$second_value
+  [[ -n "$fraction" ]] && seconds_value=$(( second_value + 0.$fraction ))
+  total=$(( 10#$days * 86400 + hour_value * 3600 + minute_value * 60 + seconds_value ))
+  print -r -- "$total"
+}
+
+# Set OWN_PATH and OWN_MTIME to the newest open file owned by pid that matches
+# the requested sensor. lsof's field output preserves whitespace in paths.
+find_newest_own_file() {
+  local pid=$1 sensor=$2 line file_path mtime
+  local newest=0
+  OWN_PATH=''
+  OWN_MTIME=''
+
+  while IFS= read -r line; do
+    [[ "$line" == n* ]] || continue
+    file_path=${line#n}
+    case "$sensor" in
+      codex) [[ "$file_path" == *sessions*rollout*.jsonl ]] || continue ;;
+      alt) [[ "$file_path" == "$ALT_HOME"/projects/*/*.jsonl ]] || continue ;;
+    esac
+    mtime=$(stat -f %m "$file_path" 2>/dev/null) || continue
+    if (( mtime >= newest )); then
+      newest=$mtime
+      OWN_PATH=$file_path
+      OWN_MTIME=$mtime
+    fi
+  done < <(lsof -Fn -p "$pid" 2>/dev/null)
+}
+
+# A start timestamp makes suppression belong to a process incarnation, not a
+# reusable PID. Remove only markers for earlier incarnations of this PID.
+marker_for_process() {
+  local sensor=$1 pid=$2 started=$3 stale
+  local identity=${started//[^[:alnum:]]/_}
+  MARKER="$STATE_DIR/.wd-$sensor-$pid-$identity"
+  for stale in "$STATE_DIR"/.wd-"$sensor"-"$pid"-*(N); do
+    [[ "$stale" == "$MARKER" ]] || rm -f -- "$stale"
+  done
+}
+
+clear_marker() {
+  [[ -n "$MARKER" ]] && rm -f -- "$MARKER"
+}
+
 while true; do
   now=$(date +%s)
-  idle_age=$(( now - $(stat -f %m "$TRANSCRIPT" 2>/dev/null || echo $now) ))
-  for cpid in $(pgrep -f "codex exec"); do
-    # real codex binaries only — shell wrappers carry "codex exec" in their
-    # argv and false-positive (0 CPU, no rollout; observed 2026-09-03 v8)
-    [ "$(ps -o comm= -p $cpid 2>/dev/null | tr -d ' ')" = "codex" ] || continue
-    roage=''
-    et=$(ps -o etime= -p $cpid 2>/dev/null | tr -d ' '); [ -z "$et" ] && continue
-    ct=$(ps -o cputime= -p $cpid 2>/dev/null | tr -d ' ')
-    esec=$(echo "$et" | awk -F'[:-]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2 }')
-    csec=$(echo "$ct" | awk -F'[:.]' '{ print $1*60+$2 }')
-    if [ "${esec:-0}" -gt "$CODEX_SECS" ] && [ "${csec:-99}" -lt 2 ]; then
-      ro=$(lsof -p $cpid 2>/dev/null | awk '/sessions.*rollout.*\.jsonl/{print $NF; exit}')
-      if [ -n "$ro" ]; then
-        roage=$(( now - $(stat -f %m "$ro" 2>/dev/null || echo 0) ))
-        [ $roage -le "$CODEX_SECS" ] && continue   # rollout fresh: healthy network-bound lane
+  transcript_mtime=$(stat -f %m "$TRANSCRIPT" 2>/dev/null || print -r -- "$now")
+  idle_age=$(( now - transcript_mtime ))
+  alt_n=0
+
+  codex_pids=("${(@f)$(pgrep -f 'codex exec' 2>/dev/null)}")
+  for cpid in "${codex_pids[@]}"; do
+    [[ -n "$cpid" ]] || continue
+    comm=$(ps -o comm= -p "$cpid" 2>/dev/null)
+    comm=${comm//[[:space:]]/}
+    [[ "$comm" == codex ]] || continue
+
+    started=$(ps -o lstart= -p "$cpid" 2>/dev/null)
+    [[ -n "$started" ]] || continue
+    marker_for_process codex "$cpid" "$started"
+
+    et=$(ps -o etime= -p "$cpid" 2>/dev/null)
+    ct=$(ps -o cputime= -p "$cpid" 2>/dev/null)
+    esec=$(parse_process_time "$et") || continue
+    csec=$(parse_process_time "$ct") || continue
+
+    if (( esec > CODEX_SECS && csec < 2 )); then
+      find_newest_own_file "$cpid" codex
+      roage=''
+      rollout_status='missing'
+      if [[ -n "$OWN_MTIME" ]]; then
+        roage=$(( now - OWN_MTIME ))
+        if (( roage <= CODEX_SECS )); then
+          clear_marker
+          continue
+        fi
+        rollout_status="${roage}s silent"
       fi
-      flagf=${TMPDIR:-/tmp}/.wd-flag-$cpid
-      if [ ! -f "$flagf" ]; then
-        echo "STALL: codex pid $cpid alive ${esec}s, ${csec}s CPU, own rollout ${roage:-none}s silent — hung (verify tee/-o target before killing)"
-        touch "$flagf"
+      if [[ ! -f "$MARKER" ]]; then
+        print -r -- "STALL: codex pid $cpid alive ${esec}s, ${csec}s CPU, own rollout $rollout_status — hung (verify tee/-o target before killing)"
+        : > "$MARKER"
       fi
+    else
+      clear_marker
     fi
   done
-  alt_n=$(pgrep -f "$(basename $ALT_HOME)" | wc -l | tr -d ' ')
-  if [ "$alt_n" -gt 0 ]; then
-    lnewest=$(ls -t $ALT_HOME/projects/*/*.jsonl 2>/dev/null | head -1)
-    if [ -n "$lnewest" ]; then
-      lage=$(( now - $(stat -f %m "$lnewest") ))
-      if [ $lage -gt "$ALT_SECS" ] && [ $alt_flagged -eq 0 ]; then
-        echo "ALT-SEAT STALL: $alt_n proc(s) alive, seat transcript silent ${lage}s"
-        alt_flagged=1
+
+  # Discover Claude executables without relying on CLAUDE_CONFIG_DIR being in
+  # argv. Each PID becomes an alternate lane only when its own lsof evidence
+  # identifies an open transcript under ALT_HOME.
+  alt_pids=("${(@f)$(pgrep -x 'claude' 2>/dev/null)}")
+  for apid in "${alt_pids[@]}"; do
+    [[ -n "$apid" ]] || continue
+    comm=$(ps -o comm= -p "$apid" 2>/dev/null)
+    comm=${comm//[[:space:]]/}
+    [[ "$comm" == claude ]] || continue
+    (( alt_n++ ))
+
+    started=$(ps -o lstart= -p "$apid" 2>/dev/null)
+    [[ -n "$started" ]] || continue
+    marker_for_process alt "$apid" "$started"
+    find_newest_own_file "$apid" alt
+    # No process-owned transcript means this sensor has no conclusion. Do not
+    # borrow a sibling/global transcript and do not manufacture a recovery.
+    [[ -n "$OWN_MTIME" ]] || continue
+
+    lage=$(( now - OWN_MTIME ))
+    if (( lage > ALT_SECS )); then
+      if [[ ! -f "$MARKER" ]]; then
+        print -r -- "ALT-SEAT STALL: claude pid $apid alive, own transcript ${lage}s silent"
+        : > "$MARKER"
       fi
-      [ $lage -le "$ALT_SECS" ] && alt_flagged=0
+    else
+      clear_marker
     fi
-  else alt_flagged=0; fi
-  if [ -n "$TRANSCRIPT" ] && [ $idle_age -ge "$IDLE_SECS" ]; then
-    echo "HEARTBEAT: idle $((idle_age/60))min, codex=$(pgrep -f 'codex exec' | wc -l | tr -d ' ') alt=$alt_n — board check due"
-    sleep 120
+  done
+
+  heartbeat_delay=0
+  if [[ -n "$TRANSCRIPT" ]] && (( idle_age >= IDLE_SECS )); then
+    codex_n=$(pgrep -f 'codex exec' 2>/dev/null | wc -l | tr -d ' ')
+    print -r -- "HEARTBEAT: idle $((idle_age/60))min, codex=$codex_n alt=$alt_n — board check due"
+    heartbeat_delay=120
   fi
-  sleep 60
+
+  (( iteration++ ))
+  if (( MAX_ITERATIONS > 0 && iteration >= MAX_ITERATIONS )); then
+    break
+  fi
+  (( heartbeat_delay > 0 )) && sleep "$heartbeat_delay"
+  sleep "$SAMPLE_SECS"
 done
