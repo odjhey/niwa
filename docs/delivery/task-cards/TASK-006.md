@@ -1,7 +1,7 @@
 ---
 id: TASK-006
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Recover the Antigravity routing policy after an orc assurance-binding defect and remove its generic stdout-stall contradiction.'
 provenance: 'Successor to TASK-005 / orc run 2JVUJS, rejected candidate f5a37babcfa46647c8b6789d2503086ae4d5add3, 2026-09-04'

@@ -24,4 +24,5 @@ exists only for repos without a live-state home.
 | `TASK-003` | [Complete watchdog state synchronization](TASK-003.md) | merged |
 | `TASK-004` | [Document script usage](TASK-004.md) | merged |
 | `TASK-005` | [Adopt Antigravity ship lanes](TASK-005.md) | abandoned |
-| `TASK-006` | [Complete Antigravity routing policy](TASK-006.md) | draft |
+| `TASK-006` | [Complete Antigravity routing policy](TASK-006.md) | merged |
+| `TASK-007` | [Detect stalled Antigravity lanes](TASK-007.md) | draft |
