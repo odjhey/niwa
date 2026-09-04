@@ -10,7 +10,8 @@ description: 'Docs root — doc types, stable IDs, and authority precedence for 
 
 This directory is the source of truth for what the system means and how it is
 delivered. Code implements what these docs specify; when code and a normative
-doc disagree, the doc wins until the doc is amended.
+doc disagree, the doc wins until the doc is amended. For operator commands,
+see the informative [repository script-usage guide](../README.md).
 
 ## Doc types and authority
 
