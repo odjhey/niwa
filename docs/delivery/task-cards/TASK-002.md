@@ -1,7 +1,7 @@
 ---
 id: TASK-002
 type: task-card
-status: draft
+status: abandoned
 authority: normative
 description: 'Close TASK-001 follow-ups by enforcing lsof command shape in tests and bounding stale watchdog marker state.'
 provenance: 'TZQVCD final convergence findings, candidate 352773b475adf903c6d4577d4830491fa45a265f, 2026-09-04'
