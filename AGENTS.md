@@ -95,9 +95,9 @@ rows: the watchtower sizes every dispatch and picks the tier
 
 | Seat | Model | Reasoning effort |
 |---|---|---|
-| Watchtower | gpt5.6 sol | high |
-| Ship agents (default) | gpt5.6 sol | high |
-| Ship agents (large/judgment-heavy) | gpt5.6 sol | high |
+| Watchtower | gpt5.6 sol | xhigh |
+| Ship agents (default) | Antigravity Gemini 3.8 Flash (High) | high |
+| Ship agents (large/judgment-heavy) | Antigravity Gemini 3.8 Flash (High) | high |
 | Recon / assessment scouts | gpt5.6 sol | high |
 | Verification scouts | gpt5.6 luna | high |
 
@@ -106,24 +106,40 @@ default tier unless the sizing rules in `OPERATING-MODEL` (Task sizing
 → Dispatch size) class the dispatch as large or judgment-heavy.
 Oversized cards are split before dispatch, never powered through.
 
-**Standing verification policy.** <!-- ADAPT: name the default
-verification seat, the fallback seat, and when both run. Earn each
-slot on SEAT-RELIABILITY evidence (a bounded paired trial, then an
-operator ruling in DECISION-LOG), never on a model roster. --> One
-seat is the default; run **two seats in parallel and adjudicate the
-union** of confirmed findings for security/trust-model specs and final
-pre-merge convergence rounds; one named fallback seat. Seats that share
-a provider backend fail together — keep at least one trial or fallback
-seat on an independent provider.
+The default ship command preserves `AGY_ADC_AUTH=true agy --model "Gemini 3.8 Flash (High)" --dangerously-skip-permissions -p "<prompt>"`.
+The standing ship invocation must include an explicit, sized, bounded `--print-timeout`
+(use 20 minutes as the default ceiling for this repo's already-bounded ship cards,
+while oversized work is still split) because dogfood revealed the built-in 5-minute
+timeout was too short for a bounded sweep and exited 1 with empty stdout and
+`Error: timeout waiting for response`. Full briefs live in files; the prompt tells
+the lane to read the absolute brief. Capture stdout and stderr; `--log-file` is
+diagnostic only and must never count as progress. Exit 0 is insufficient without a
+nonempty report that answers the brief and clean stderr. Corrective attempts start
+fresh with a self-contained brief; resume evaluation is deferred per `DECISION-0002`.
+
+**Standing verification policy.** Ordinary and final-convergence
+assurance uses one independent GPT-5.6 Luna verifier at high reasoning.
+Security/trust-model specs retain two independent-provider verifiers and
+cannot use the Gemini ship family as assurance. The second security seat
+is not a standing named seat until it earns one through `SEAT-RELIABILITY`;
+such work must trial/qualify the independent fallback rather than
+silently use Gemini or another OpenAI-backed seat. Seats that share a
+provider backend fail together — keep at least one trial or fallback seat
+on an independent provider.
 
 **Verified headless invocations** — the shapes, stall signatures, and
 thresholds that cost days to learn are cached in `HEADLESS-SEATS`
-("Verified dispatch shapes and stall signatures"): codex via
-`exec` with the brief on stdin and `-o <out-file>`; pi with the model
-flag (REQUIRED — bare `pi -p` hangs silently); qoder via stdin; claude
-on an alternate account via `CLAUDE_CONFIG_DIR`. Treat >15 minutes of
-output silence at ~zero CPU as a stall; after two stalls on the same
-brief, switch seats. Verify a stall claim before killing a lane.
+("Verified dispatch shapes and stall signatures"): Antigravity via `agy`
+in print mode (`-p`) with prompt pointing to absolute brief file; codex
+via `exec` with the brief on stdin and `-o <out-file>`; pi with the
+model flag (REQUIRED — bare `pi -p` hangs silently); claude on an
+alternate account via `CLAUDE_CONFIG_DIR`. Stall claims require
+attributable per-harness evidence per `HEADLESS-SEATS` rather than generic
+output silence: Antigravity uses its own open conversation `.db`/`.db-wal`,
+never stdout or diagnostic log growth; codex own-rollout, pi
+session-transcript, and alternate-Claude own-transcript semantics govern
+by reference. After two stalls on the same brief, switch seats. Verify a
+stall claim before killing a lane.
 
 <!-- ADAPT (optional): ship-seat account routing. If a second harness
 account exists, NEW ship dispatches can run headless on it until it

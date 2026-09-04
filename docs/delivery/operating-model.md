@@ -20,8 +20,8 @@ preference order: the harness's native subagent features when it has
 them (per-harness notes in `NATIVE-SEATS`); otherwise external agent
 processes — through an agent-client-protocol CLI (acpx preferred —
 worked example in `ACPX-SEATS`) or through another harness's headless /
-non-interactive mode (e.g. `pi -p`, `claude -p`, `codex exec`,
-`qoder -p` — worked examples in `HEADLESS-SEATS`). The roles and
+non-interactive mode (e.g. `agy -p`, `pi -p`, `claude -p`, `codex exec`
+— worked examples in `HEADLESS-SEATS`). The roles and
 pipeline are unchanged in every case — only the spawning mechanism
 differs.
 

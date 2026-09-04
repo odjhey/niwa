@@ -3,7 +3,7 @@ id: NATIVE-SEATS
 type: playbook
 status: current
 authority: informative
-description: 'Driving seats through the harness''s native subagent features — spawn mechanism, seat definitions, model/effort per seat, background dispatch, and worktree isolation per watchtower harness (pi + pi-subagents, claude, codex, qoder).'
+description: 'Driving seats through the harness''s native subagent features — spawn mechanism, seat definitions, model/effort per seat, background dispatch, and worktree isolation per watchtower harness (pi + pi-subagents, claude, codex).'
 ---
 
 # Driving seats through native subagent features
@@ -19,13 +19,13 @@ real child agent (via its native mechanism, driven headlessly) that
 returned a codeword, relayed verbatim to the parent. Flag and tool names
 go stale — re-verify against `--help`/package docs after upgrades.
 
-| Capability | `pi` (+ `pi-subagents`) | `claude` | `codex` | `qoder` |
-|---|---|---|---|---|
-| Spawn mechanism | `subagent` tool from `pi install npm:pi-subagents` | Task/Agent tool (built in) | collab tools from the `multi_agent` feature (stable; check `codex features list`) | Task/Agent tool (built in) |
-| Seat definitions | agent `.md` files: builtin roles (`scout`, `researcher`, `worker`, `reviewer`, `oracle`, `delegate`), project agents in `.pi/agents/**/*.md` | `.claude/agents/*.md`, or inline `--agents <json>`, `--agent <name>` | none observed — prompt-level role assignment | discovered agents (`qoder agents list`), inline `--agents <json>`, `--agent <name>` |
-| Model / effort per seat | agent frontmatter or `subagents.agentOverrides.<name>.model` (see package `docs/models.md`) | `model` field in agent frontmatter / `--agents` JSON | inherited from session | per-agent config or session flags |
-| Background / parallel | background runs, FleetView, `/subagents-fleet` inspector, spawn budget (`maxSubagentSpawnsPerRun`, default 64) | parallel Task calls; `--bg` sessions reaped via `claude agents` | `codex agents` browses agent sessions on the shared daemon | parallel Task calls |
-| Worktree isolation | per its `docs/workflows.md` | native worktree isolation | — | `--worktree [name]` |
+| Capability | `pi` (+ `pi-subagents`) | `claude` | `codex` |
+|---|---|---|---|
+| Spawn mechanism | `subagent` tool from `pi install npm:pi-subagents` | Task/Agent tool (built in) | collab tools from the `multi_agent` feature (stable; check `codex features list`) |
+| Seat definitions | agent `.md` files: builtin roles (`scout`, `researcher`, `worker`, `reviewer`, `oracle`, `delegate`), project agents in `.pi/agents/**/*.md` | `.claude/agents/*.md`, or inline `--agents <json>`, `--agent <name>` | none observed — prompt-level role assignment |
+| Model / effort per seat | agent frontmatter or `subagents.agentOverrides.<name>.model` (see package `docs/models.md`) | `model` field in agent frontmatter / `--agents` JSON | inherited from session |
+| Background / parallel | background runs, FleetView, `/subagents-fleet` inspector, spawn budget (`maxSubagentSpawnsPerRun`, default 64) | parallel Task calls; `--bg` sessions reaped via `claude agents` | `codex agents` browses agent sessions on the shared daemon |
+| Worktree isolation | per its `docs/workflows.md` | native worktree isolation | — |
 
 ## Notes per harness
 
@@ -46,8 +46,6 @@ go stale — re-verify against `--help`/package docs after upgrades.
   works under `codex exec` (verified). It offers the least seat-shaping:
   no per-seat definition files observed; roles are assigned in the
   prompt.
-- **qoder** — mirrors claude's shape (`--agents` JSON verified with
-  `-p`); also has native `--worktree` startup, useful for ship seats.
 
 Whatever spawns the seat, the brief is the same: governing doc IDs, a
 checkable definition of done, and the seat defaults table in `AGENTS.md`
