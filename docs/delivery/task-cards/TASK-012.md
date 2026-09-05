@@ -1,7 +1,7 @@
 ---
 id: TASK-012
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Recover transcript release conformance after run 22W4Z7 exhausted and repair signed-mtime handling and stale release-blocker prose.'
 provenance: 'Successor to TASK-011 / orc 22W4Z7 candidate 5d30df7 after final Luna rejection and assurance-index defect, 2026-09-05'
