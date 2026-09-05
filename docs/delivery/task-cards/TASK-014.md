@@ -1,7 +1,7 @@
 ---
 id: TASK-014
 type: task-card
-status: draft
+status: abandoned
 authority: normative
 description: 'Resolve the build-toolchain determinism and accepted Markdown-link syntax ambiguities exposed by TASK-013 assurance.'
 provenance: 'Created from paired TASK-013 attempt-1 verification findings on candidate a050bc5, 2026-09-05'

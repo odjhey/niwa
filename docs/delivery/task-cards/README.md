@@ -32,4 +32,5 @@ exists only for repos without a live-state home.
 | `TASK-011` | [Conform transcript discovery for release](TASK-011.md) | abandoned |
 | `TASK-012` | [Recover transcript release conformance](TASK-012.md) | merged |
 | `TASK-013` | [Build and publish the lane-watchdog vendor bundle](TASK-013.md) | draft |
-| `TASK-014` | [Resolve package determinism and link-syntax gaps](TASK-014.md) | draft |
+| `TASK-014` | [Resolve package determinism and link-syntax gaps](TASK-014.md) | abandoned |
+| `TASK-015` | [Complete package determinism and link-syntax contract](TASK-015.md) | draft |
