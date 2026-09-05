@@ -116,15 +116,17 @@ primary root:
 Arm `lane-watchdog.sh` (this directory) as a persistent harness
 monitor at session start whenever external seats will run — its
 stdout lines become notifications. Sensors and thresholds are in the
-script header. Hard-won rules (from the originating repo's 2026-09-03
-dogfood, nine revisions; keep your own telemetry in `SEAT-RELIABILITY`):
+script header; cross-project adoption rules and local policy separation
+are in `LANE-SUPERVISION-ADOPTION` (`docs/playbooks/lane-supervision-adoption.md`).
+Hard-won rules (from the originating repo's 2026-09-03 dogfood, nine revisions;
+keep your own telemetry in `SEAT-RELIABILITY`):
 
-- **Attribution before everything.** A sensor must bind its signal to
-  YOUR lane: per-process CPU (never a global file's mtime — any
-  session's healthy sibling masks your stalled lane), seat-owned
-  transcripts (never stdout pipes — headless seats buffer), and
-  session-scoped process matches (never machine-wide greps — other
-  sessions' seats trip them).
+- **Attribution before everything.** Evidence must bind to the process
+  under test: per-process CPU (never a global file's mtime — any
+  healthy sibling masks a stalled lane) and seat-owned files/transcripts
+  (never stdout pipes — headless seats buffer). Candidate discovery
+  remains machine-wide (not session-scoped); the detector checks
+  per-PID evidence but does not establish project or process ownership.
 - **Verify before killing.** An alert is a claim, not a verdict:
   check the process's CPU time and its tee/`-o` target before any
   kill — one wrong kill destroyed a healthy 6-minute verification.

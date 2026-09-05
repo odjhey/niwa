@@ -84,6 +84,7 @@ by path alone — paths move, IDs do not. Rules:
 | `NATIVE-SEATS` | `docs/playbooks/native-seats.md` | informative |
 | `ACPX-SEATS` | `docs/playbooks/acpx-seats.md` | informative |
 | `HEADLESS-SEATS` | `docs/playbooks/headless-seats.md` | informative |
+| `LANE-SUPERVISION-ADOPTION` | `docs/playbooks/lane-supervision-adoption.md` | informative |
 | `TASK-CARDS` | `docs/delivery/task-cards/README.md` | informative |
 | `TEMPLATE-TASK-CARD` | `docs/templates/task-card-template.md` | informative |
 | `TEMPLATE-SHIP-BRIEF` | `docs/templates/ship-brief-template.md` | informative |

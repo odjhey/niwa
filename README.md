@@ -1,6 +1,6 @@
 # Niwa
 
-Niwa is a docs-first repository for operating an agent delivery pipeline and its supporting documentation and lane-supervision tools. Start with the authoritative [docs root](docs/README.md); repository instructions are in [AGENTS.md](AGENTS.md), headless-seat guidance is in [HEADLESS-SEATS](docs/playbooks/headless-seats.md), and the delivery cycle and watchdog context are in the [watchtower-loop skill](.agents/skills/watchtower-loop/SKILL.md).
+Niwa is a docs-first repository for operating an agent delivery pipeline and its supporting documentation and lane-supervision tools. Start with the authoritative [docs root](docs/README.md); repository instructions are in [AGENTS.md](AGENTS.md), headless-seat guidance is in [HEADLESS-SEATS](docs/playbooks/headless-seats.md), cross-project adoption guidance is in [LANE-SUPERVISION-ADOPTION](docs/playbooks/lane-supervision-adoption.md), and the delivery cycle and watchdog context are in the [watchtower-loop skill](.agents/skills/watchtower-loop/SKILL.md).
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ The watchdog writes advisory records to stdout:
 - `AGY STALL:` — an Antigravity print-mode process exceeded the startup threshold without an attributable conversation database or exceeded the silence threshold since its newest own database update.
 - `HEARTBEAT:` — this watchtower transcript reached the idle threshold; the board should be checked.
 
-> **Alert-only:** every record is a claim that requires manual evidence verification before any process action. The watchdog never kills, signals, owns, or reaps a process.
+> **Alert-only:** every record is a claim that requires manual evidence verification before any process action. The watchdog never kills, signals, owns, or reaps a process. For adopting lane supervision in other repositories without importing Niwa seat policy, follow [LANE-SUPERVISION-ADOPTION](docs/playbooks/lane-supervision-adoption.md).
 
 ## Script reference
 

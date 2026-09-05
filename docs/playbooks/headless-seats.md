@@ -166,10 +166,10 @@ signatures are the durable part.
   - **Attributable storage**: each live lane opens its own
     `~/.gemini/antigravity-cli/conversations/<id>.db` plus SQLite sidecars
     (`-wal`, `-shm`). In dogfood, an attributable conversation database
-    appeared within 2 seconds of dispatch; the successor watchdog contract
-    will use 60 seconds as the startup threshold. Per-conversation
-    `.db`/`.db-wal` mtime is the proposed attributable progress evidence
-    for the successor watchdog task.
+    appeared within 2 seconds of dispatch; the implemented watchdog
+    uses 60 seconds as the startup threshold. Per-conversation
+    `.db`/`.db-wal` mtime is the attributable progress evidence
+    checked by the watchdog sensor.
   - **Buffering & liveness**: stdout may remain completely empty until
     final output is flushed at turn completion, so pipe growth is not
     liveness. Exit 0 is insufficient without a nonempty report that
@@ -215,7 +215,9 @@ signatures are the durable part.
   verdict: check the process's CPU time and its tee/`-o` target
   before any kill — one wrong kill destroyed a healthy 6-minute
   verification. A reference watchdog with these sensors ships as
-  `.agents/skills/watchtower-loop/lane-watchdog.sh`.
+  `.agents/skills/watchtower-loop/lane-watchdog.sh`; cross-project
+  adoption without importing Niwa policy is documented in
+  [LANE-SUPERVISION-ADOPTION](lane-supervision-adoption.md).
 
 ## Caveats observed during smoke verification
 
