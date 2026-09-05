@@ -1,7 +1,7 @@
 ---
 id: TASK-009
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Publish one cross-project adoption entry point for lane supervision without importing Niwa seat policy.'
 provenance: 'Operator request for a portable handoff to projects with independent seat policies, 2026-09-04'
