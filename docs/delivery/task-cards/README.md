@@ -27,3 +27,4 @@ exists only for repos without a live-state home.
 | `TASK-006` | [Complete Antigravity routing policy](TASK-006.md) | merged |
 | `TASK-007` | [Detect stalled Antigravity lanes](TASK-007.md) | merged |
 | `TASK-008` | [Remove ADC auth from Antigravity routing](TASK-008.md) | merged |
+| `TASK-009` | [Publish cross-project lane-supervision adoption guide](TASK-009.md) | draft |
