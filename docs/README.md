@@ -73,6 +73,7 @@ by path alone — paths move, IDs do not. Rules:
 | `OPERATING-MODEL` | `docs/delivery/operating-model.md` | informative |
 | `DELIVERY-MODES` | `docs/delivery/modes.md` | informative |
 | `ORC-ERGO-DELIVERY` | `docs/delivery/orc-ergo-delivery.md` | normative |
+| `LANE-WATCHDOG-CONTRACT` | `docs/contracts/lane-watchdog.md` | normative |
 | `SEAT-RELIABILITY` | `docs/delivery/seat-reliability.md` | informative |
 | `DECISION-LOG` | `docs/delivery/decisions/README.md` | informative |
 | `DECISION-REVIEW-LOG` | `docs/delivery/decisions/reviews/README.md` | informative |

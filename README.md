@@ -1,6 +1,6 @@
 # Niwa
 
-Niwa is a docs-first repository for operating an agent delivery pipeline and its supporting documentation and lane-supervision tools. Start with the authoritative [docs root](docs/README.md); repository instructions are in [AGENTS.md](AGENTS.md), headless-seat guidance is in [HEADLESS-SEATS](docs/playbooks/headless-seats.md), cross-project adoption guidance is in [LANE-SUPERVISION-ADOPTION](docs/playbooks/lane-supervision-adoption.md), and the delivery cycle and watchdog context are in the [watchtower-loop skill](.agents/skills/watchtower-loop/SKILL.md).
+Niwa is a docs-first repository for operating an agent delivery pipeline and its supporting documentation and lane-supervision tools. Start with the authoritative [docs root](docs/README.md); repository instructions are in [AGENTS.md](AGENTS.md), headless-seat guidance is in [HEADLESS-SEATS](docs/playbooks/headless-seats.md), cross-project adoption guidance is in [LANE-SUPERVISION-ADOPTION](docs/playbooks/lane-supervision-adoption.md), the public package contract is in [LANE-WATCHDOG-CONTRACT](docs/contracts/lane-watchdog.md), and the delivery cycle and watchdog context are in the [watchtower-loop skill](.agents/skills/watchtower-loop/SKILL.md).
 
 ## Prerequisites
 
@@ -55,7 +55,7 @@ For a bounded probe, use an isolated temporary state directory and set `WD_MAX_I
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WD_TRANSCRIPT` | Newest `*.jsonl` in `~/.claude/projects/<cwd-slug>/` | This watchtower session's transcript for heartbeat idleness. `<cwd-slug>` is the current working directory with `/` changed to `-`; set an absolute path to avoid selecting the wrong session. |
+| `WD_TRANSCRIPT` | Target: newest matching `*.jsonl` in `~/.claude/projects/<cwd-slug>/`, or empty if none | This watchtower session's transcript for heartbeat idleness. Target contract selects the newest matching transcript when unset, or resolves to empty (disabling heartbeats only) when none exist. In current source, running without matching transcripts triggers a zsh glob error; release 0.1.0 is blocked until conforming. Explicit paths are used verbatim. |
 | `WD_ALT_HOME` | `$HOME/.claude-alt` | Alternate Claude `CLAUDE_CONFIG_DIR`. A Claude process is attributable only through its own open transcript under `$WD_ALT_HOME/projects/*/*.jsonl`. |
 | `WD_CODEX_SECS` | `900` seconds | Codex elapsed-time and own-rollout-silence threshold. A claim also requires less than 2 seconds of process CPU; the comparisons are strict (`>` threshold). |
 | `WD_ALT_SECS` | `1200` seconds | Strict (`>`) alternate-Claude own-transcript silence threshold. |
@@ -73,7 +73,7 @@ The watchdog writes advisory records to stdout:
 - `AGY STALL:` — an Antigravity print-mode process exceeded the startup threshold without an attributable conversation database or exceeded the silence threshold since its newest own database update.
 - `HEARTBEAT:` — this watchtower transcript reached the idle threshold; the board should be checked.
 
-> **Alert-only:** every record is a claim that requires manual evidence verification before any process action. The watchdog never kills, signals, owns, or reaps a process. For adopting lane supervision in other repositories without importing Niwa seat policy, follow [LANE-SUPERVISION-ADOPTION](docs/playbooks/lane-supervision-adoption.md).
+> **Alert-only:** every record is a claim that requires manual evidence verification before any process action. The watchdog never kills, signals, owns, or reaps a process. For adopting lane supervision in other repositories without importing Niwa seat policy, follow [LANE-SUPERVISION-ADOPTION](docs/playbooks/lane-supervision-adoption.md). The planned release package and manifest contract is defined in [LANE-WATCHDOG-CONTRACT](docs/contracts/lane-watchdog.md) (release `0.1.0` is planned; release creation is blocked until runtime conformance is verified; see [DECISION-0004](docs/delivery/decisions/0004-lane-watchdog-distribution.md)).
 
 ## Script reference
 
@@ -88,9 +88,13 @@ The watchdog writes advisory records to stdout:
 
 ## Troubleshooting
 
-- Missing `zsh/system` or `zsystem flock` support, an unusable startup lock path, and runtime lock acquire/release errors are fatal and print `lane-watchdog:` diagnostics to stderr.
+- Missing `zsh/system` or `zsystem flock` support, an unusable startup lock path, and runtime lock acquire/release errors are fatal watchdog diagnostics that exit 1 and print `lane-watchdog:` diagnostics to stderr.
 - No process-owned alternate-Claude transcript is non-conclusive; the watchdog does not borrow a sibling or global transcript. Discovery failures likewise preserve existing sensor markers rather than inferring recovery. For Codex only, a missing own rollout can contribute to `STALL:` when the elapsed-time and CPU predicates also hold.
 - Antigravity discovery requires exact `comm=agy` and a space/token-delimited `-p` or `--print` option (interactive `agy` is excluded); progress is attributed only to the selected PID's own open `$HOME/.gemini/antigravity-cli/conversations/*.db` or `*.db-wal`. A failed lookup or matched-file `stat` failure is non-conclusive and disables cleanup only for Antigravity.
-- Run the watchdog from the intended working directory: default transcript discovery derives `<cwd-slug>` from that directory.
+- Run the watchdog from the intended working directory: default transcript discovery derives `<cwd-slug>` from that directory. When `WD_TRANSCRIPT` is unset and no matching default transcripts exist, current source fails with a zsh `no matches found` glob error before startup; release 0.1.0 is blocked until an implementation fix satisfies contracted fallback behavior. Set `WD_TRANSCRIPT` explicitly when testing in directories without Claude sessions.
+
+## License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 For contract questions, follow [DOCS-ROOT](docs/README.md) and the governing documents it registers rather than treating this usage guide as normative.

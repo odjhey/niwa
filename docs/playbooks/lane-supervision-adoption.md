@@ -12,7 +12,9 @@ This playbook is the single handoff entry point to give a new project or agent
 first when adopting or adapting headless lane supervision. An adopting project's
 seat policy is authoritative locally: do **not** import Niwa's model, provider,
 account, verifier count, timeout, resume, orc/ergo delivery ledger, or
-remediation choices by default.
+remediation choices by default. The public package interface, distribution
+archive layout, and runtime contract are governed by
+[`LANE-WATCHDOG-CONTRACT`](../contracts/lane-watchdog.md).
 
 Adopters must separate three concerns:
 1. **Reusable detector invariants** (§1): the fixed mechanics of process-owned evidence and safety.
@@ -83,8 +85,8 @@ Every adopting project owns its seat and supervision policy. Before deploying or
 
 Choose one of two supported adoption paths:
 
-1. **Vendor the paired artifact**:
-   Copy [`.agents/skills/watchtower-loop/lane-watchdog.sh`](../../.agents/skills/watchtower-loop/lane-watchdog.sh) and [`.agents/skills/watchtower-loop/lane-watchdog.test.mjs`](../../.agents/skills/watchtower-loop/lane-watchdog.test.mjs) together from a pinned commit or release into the target repository. The script and test suite form an indivisible pair: the paired fake-command suite verifies deterministic sensor seams, suppression, lock serialization, and error behavior under fakes, not host integration. Host compatibility still requires prerequisites, syntax checks, the adopting project gate, a bounded isolated probe, and any local live trial the adopter's policy requires.
+1. **Vendor the paired release bundle**:
+   The planned canonical distribution format under [`LANE-WATCHDOG-CONTRACT`](../contracts/lane-watchdog.md) is a versioned GitHub Release archive `niwa-lane-watchdog-<version>.tar.gz` and sidecar `niwa-lane-watchdog-<version>.tar.gz.sha256` (initial release `0.1.0` is planned and contracted; do not assume it is already published; release creation is blocked until runtime conformance is verified). Consumers download a pinned release bundle, verify the sidecar SHA-256 before extraction, and vendor [`.agents/skills/watchtower-loop/lane-watchdog.sh`](../../.agents/skills/watchtower-loop/lane-watchdog.sh) and [`.agents/skills/watchtower-loop/lane-watchdog.test.mjs`](../../.agents/skills/watchtower-loop/lane-watchdog.test.mjs) together into the target repository. The script and test suite form an indivisible pair: the paired fake-command suite verifies deterministic sensor seams, suppression, lock serialization, and error behavior under fakes, not host integration. Host compatibility still requires prerequisites, syntax checks, the adopting project gate, a bounded isolated probe, and any local live trial the adopter's policy requires.
 2. **Reimplement from the evidence model**:
    Build a custom detector matching the evidence invariants (process-owned file inspection, strict time boundaries, atomic suppression, fail-closed process discovery). Adopters must write a comprehensive test suite matching the reference coverage before deployment.
 3. **Adaptation boundary**:
@@ -94,9 +96,27 @@ Choose one of two supported adoption paths:
 
 ## 5. Installation, upgrade, and verification path
 
-1. **Pin source identity**: Record the upstream commit SHA or release tag in your project's vendor documentation.
-2. **Vendor the pair**: Place `lane-watchdog.sh` and `lane-watchdog.test.mjs` in your project's skill or tool path.
-3. **Run the 4-stage verification gate**:
+1. **Download pinned release and sidecar**:
+   Fetch the target release archive and its checksum sidecar for a specific pinned tag from GitHub Releases (substituting the target release version, e.g. `0.1.0` when published):
+   ```bash
+   curl -fsSLO "https://github.com/odjhey/niwa/releases/download/lane-watchdog-v${VERSION}/niwa-lane-watchdog-${VERSION}.tar.gz"
+   curl -fsSLO "https://github.com/odjhey/niwa/releases/download/lane-watchdog-v${VERSION}/niwa-lane-watchdog-${VERSION}.tar.gz.sha256"
+   ```
+   **Security rules:**
+   - **Never** vendor directly from git branch HEAD.
+   - **Never** pipe release downloads directly into a shell interpreter (`curl | sh`).
+2. **Verify checksum before extraction**:
+   ```bash
+   shasum -a 256 -c "niwa-lane-watchdog-${VERSION}.tar.gz.sha256"
+   ```
+3. **Extract and verify internal checksums**:
+   ```bash
+   tar -xzf "niwa-lane-watchdog-${VERSION}.tar.gz"
+   (cd "niwa-lane-watchdog-${VERSION}" && shasum -a 256 -c SHA256SUMS)
+   ```
+4. **Vendor the pair and commit provenance**:
+   Place `lane-watchdog.sh` and `lane-watchdog.test.mjs` in your project's skill or tool path (the packaged `ADOPTION.md` includes commit-pinned provenance and bundle-safe relative links to both). Commit them to version control alongside provenance notes recording the release tag, upstream commit SHA, and manifest.
+5. **Run the 4-stage verification gate**:
    ```bash
    # 1. Shell syntax check
    /bin/zsh -n path/to/lane-watchdog.sh
@@ -116,7 +136,8 @@ Choose one of two supported adoption paths:
      WD_STATE_DIR="$probe_dir" WD_TRANSCRIPT="$probe_transcript" WD_MAX_ITERATIONS=1 /bin/zsh path/to/lane-watchdog.sh
    )
    ```
-4. **Upgrade discipline**: When upgrading from upstream, update both files together to the new pinned commit and re-run all 4 verification stages.
+6. **Declare local policy**: Fill and commit the local lane-supervision policy declaration (§3); Niwa seat policy is non-portable and remains local to Niwa.
+7. **Upgrade discipline**: When upgrading from upstream, download the new pinned release bundle, verify checksums before extraction, update both files together, and re-run all 4 verification stages.
 
 ---
 
@@ -125,12 +146,12 @@ Choose one of two supported adoption paths:
 Use this prompt when delegating lane-supervision adoption to an agent in another project:
 
 ```text
-Adopt or adapt lane supervision for this repository following the stable guide LANE-SUPERVISION-ADOPTION (docs/playbooks/lane-supervision-adoption.md in Niwa).
+Adopt or adapt lane supervision for this repository following the stable guide LANE-SUPERVISION-ADOPTION (docs/playbooks/lane-supervision-adoption.md in Niwa) and public package contract LANE-WATCHDOG-CONTRACT (docs/contracts/lane-watchdog.md in Niwa).
 
 Rules:
-1. Read LANE-SUPERVISION-ADOPTION first before modifying or running any code.
-2. Inspect this project's existing seat, provider, account, timeout, and verification documentation. Fill the local-policy declaration explicitly; do NOT import Niwa's models, timeouts, or orc/ergo delivery choices by default.
+1. Read LANE-SUPERVISION-ADOPTION and LANE-WATCHDOG-CONTRACT first before modifying or running any code.
+2. Inspect this project's existing seat, provider, account, timeout, and verification documentation. Fill the local-policy declaration explicitly; do NOT import Niwa's models, timeouts, or orc/ergo delivery choices by default (Niwa seat policy is non-portable).
 3. Treat the detector as alert-only and advisory: it provides claims, not verdicts, and authorizes no automatic process action. Any automated remediation requires approving a separate normative ownership/supervision contract (process identity/ownership, permitted signals/tree semantics, fail-closed behavior, and audit). Until then, remediation is manually corroborated and manually authorized.
-4. If vendoring, copy both lane-watchdog.sh and lane-watchdog.test.mjs at a pinned source identity. If modifying, declare the implementation as adapted.
+4. If vendoring, download a pinned release bundle, verify its sidecar checksum before extraction, verify internal SHA256SUMS, and copy both lane-watchdog.sh and lane-watchdog.test.mjs together with committed provenance. Never vendor from branch HEAD and never use curl | sh. If modifying, declare the implementation as adapted.
 5. Verify using shell syntax checks (/bin/zsh -n), the focused Node test suite, the repository gate, and a self-contained bounded isolated probe (isolated WD_STATE_DIR, explicit transcript via WD_TRANSCRIPT, and WD_MAX_ITERATIONS=1).
 ```
