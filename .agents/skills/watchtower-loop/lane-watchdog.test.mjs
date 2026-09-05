@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   watch,
@@ -80,6 +81,9 @@ if (command === 'date') {
   }
 } else if (command === 'stat') {
   const path = args.at(-1)
+  if (process.env.WD_TEST_STAT_LOG) {
+    appendFileSync(process.env.WD_TEST_STAT_LOG, path + '\\n')
+  }
   if (fixture.mtimes[path] === undefined) process.exitCode = 1
   else {
     print(fixture.mtimes[path])
@@ -96,7 +100,7 @@ if (command === 'date') {
 `
 
 function makeHarness(t) {
-  const root = mkdtempSync(join(tmpdir(), 'lane watchdog test '))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'lane watchdog test ')))
   const bin = join(root, 'fake bin')
   const stateDir = join(root, 'state markers')
   const altHome = join(root, 'alternate claude home')
@@ -104,6 +108,7 @@ function makeHarness(t) {
   const transcript = join(root, 'watchtower transcript.jsonl')
   const fixturePath = join(root, 'fixture.json')
   const sleepLog = join(root, 'sleep.log')
+  const statLog = join(root, 'stat.log')
   mkdirSync(bin)
   mkdirSync(stateDir)
   mkdirSync(altHome)
@@ -111,7 +116,7 @@ function makeHarness(t) {
   const fakeCommand = join(bin, 'fake-command.mjs')
   writeFileSync(fakeCommand, fakeCommandSource)
   chmodSync(fakeCommand, 0o755)
-  for (const command of ['date', 'pgrep', 'ps', 'lsof', 'stat', 'sleep']) {
+  for (const command of ['date', 'pgrep', 'ps', 'lsof', 'stat', 'sleep', 'ls', 'head']) {
     symlinkSync('fake-command.mjs', join(bin, command))
   }
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -129,7 +134,7 @@ function makeHarness(t) {
   }
 
   function watchdogEnv(env = {}) {
-    return {
+    const base = {
       ...process.env,
       HOME: root,
       PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
@@ -139,15 +144,22 @@ function makeHarness(t) {
       WD_STATE_DIR: stateDir,
       WD_TEST_FIXTURE: fixturePath,
       WD_TEST_SLEEP_LOG: sleepLog,
+      WD_TEST_STAT_LOG: statLog,
       WD_TRANSCRIPT: transcript,
       ...env,
     }
+    if (env && 'WD_TRANSCRIPT' in env && env.WD_TRANSCRIPT === undefined) {
+      delete base.WD_TRANSCRIPT
+    }
+    return base
   }
 
-  function runRaw(fixture, env = {}) {
+  function runRaw(fixture, env = {}, options = {}) {
     writeFixture(fixture)
     writeFileSync(sleepLog, '')
+    writeFileSync(statLog, '')
     const result = spawnSync('/bin/zsh', [watchdog], {
+      cwd: options.cwd,
       encoding: 'utf8',
       env: watchdogEnv(env),
     })
@@ -155,16 +167,17 @@ function makeHarness(t) {
       ...result,
       lines: result.stdout.trim() ? result.stdout.trim().split('\n') : [],
       sleeps: readFileSync(sleepLog, 'utf8').trim().split('\n').filter(Boolean),
+      stats: readFileSync(statLog, 'utf8').trim().split('\n').filter(Boolean),
     }
   }
 
-  function run(fixture, env = {}) {
-    const result = runRaw(fixture, env)
+  function run(fixture, env = {}, options = {}) {
+    const result = runRaw(fixture, env, options)
     assert.equal(result.status, 0, `watchdog failed:\n${result.stderr}`)
     return result
   }
 
-  function spawnRun(fixture, env = {}) {
+  function spawnRun(fixture, env = {}, options = {}) {
     let readyWatcher
     let blockedResolve
     const blocked = new Promise((resolve) => {
@@ -181,7 +194,11 @@ function makeHarness(t) {
     })
     writeFixture(fixture)
     writeFileSync(sleepLog, '')
-    const child = spawn('/bin/zsh', [watchdog], { env: watchdogEnv(env) })
+    writeFileSync(statLog, '')
+    const child = spawn('/bin/zsh', [watchdog], {
+      cwd: options.cwd,
+      env: watchdogEnv(env),
+    })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => { stdout += chunk })
@@ -214,7 +231,23 @@ function makeHarness(t) {
     return readdirSync(stateDir).filter((name) => name.startsWith(`.wd-${sensor}-`)).sort()
   }
 
-  return { agyConvDir, altHome, invokeLsof, markers, run, runRaw, spawnRun, stateDir, transcript }
+  return { agyConvDir, altHome, invokeLsof, markers, root, run, runRaw, spawnRun, stateDir, statLog, transcript }
+}
+
+// Builds an isolated working directory plus the default
+// `~/.claude/projects/<cwd-slug>/` transcript directory the watchdog derives
+// from it, and creates one empty file per name.
+function makeDefaultTranscripts(harness, projectName, names) {
+  const projectDir = join(harness.root, projectName)
+  mkdirSync(projectDir)
+  const transcriptsDir = join(harness.root, '.claude', 'projects', projectDir.replaceAll('/', '-'))
+  mkdirSync(transcriptsDir, { recursive: true })
+  const files = {}
+  for (const name of names) {
+    files[name] = join(transcriptsDir, name)
+    writeFileSync(files[name], '')
+  }
+  return { files, projectDir, transcriptsDir }
 }
 
 function holdSensorLock(lockFile) {
@@ -1266,4 +1299,649 @@ test('Antigravity print mode selector distinguishes print and interactive flags 
   const alertedPids = lines.map((l) => l.match(/pid (\d+)/)?.[1]).sort()
   assert.deepEqual(alertedPids, ['811', '812', '813', '814', '815', '816'])
   assert.ok(lines.every((l) => l.startsWith('AGY STALL:') && l.includes('own conversation database 2000s silent')))
+})
+
+test('when WD_TRANSCRIPT is unset and no default transcripts exist, watchdog exits cleanly with no stderr', (t) => {
+  const harness = makeHarness(t)
+  const result = harness.run({}, { WD_TRANSCRIPT: undefined })
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.deepEqual(result.lines, [])
+})
+
+test('when WD_TRANSCRIPT is unset, default discovery chooses the newest transcript by mtime', (t) => {
+  const harness = makeHarness(t)
+  const projectDir = join(harness.root, 'project-newest')
+  mkdirSync(projectDir)
+  const slug = projectDir.replaceAll('/', '-')
+  const transcriptsDir = join(harness.root, '.claude', 'projects', slug)
+  mkdirSync(transcriptsDir, { recursive: true })
+  const olderFile = join(transcriptsDir, 'older.jsonl')
+  const newerFile = join(transcriptsDir, 'newer.jsonl')
+  writeFileSync(olderFile, '')
+  writeFileSync(newerFile, '')
+
+  const now = 10_000
+  const result = harness.run(
+    {
+      now,
+      mtimes: {
+        [olderFile]: now - 3600,
+        [newerFile]: now - 1860,
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: projectDir },
+  )
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.equal(result.lines.length, 1)
+  assert.match(result.lines[0], /^HEARTBEAT: idle 31min/)
+  assert.equal(result.stats.at(-1), newerFile)
+})
+
+test('when default transcripts have equal mtimes, discovery breaks ties with the lexicographically smallest absolute path', (t) => {
+  const harness = makeHarness(t)
+  const projectDir = join(harness.root, 'project-tie')
+  mkdirSync(projectDir)
+  const slug = projectDir.replaceAll('/', '-')
+  const transcriptsDir = join(harness.root, '.claude', 'projects', slug)
+  mkdirSync(transcriptsDir, { recursive: true })
+  const fileA = join(transcriptsDir, 'a-session.jsonl')
+  const fileZ = join(transcriptsDir, 'z-session.jsonl')
+  writeFileSync(fileA, '')
+  writeFileSync(fileZ, '')
+
+  assert(fileA < fileZ, 'fileA must sort lexicographically before fileZ')
+
+  const now = 10_000
+  const result = harness.run(
+    {
+      now,
+      mtimes: {
+        [fileA]: now - 2400,
+        [fileZ]: now - 2400,
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: projectDir },
+  )
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.equal(result.lines.length, 1)
+  assert.match(result.lines[0], /^HEARTBEAT: idle 40min/)
+  assert.equal(result.stats.at(-1), fileA)
+
+  // When fileZ is strictly newer, fileZ is chosen over fileA
+  const resultNewerZ = harness.run(
+    {
+      now,
+      mtimes: {
+        [fileA]: now - 2400,
+        [fileZ]: now - 1860,
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: projectDir },
+  )
+  assert.equal(resultNewerZ.status, 0)
+  assert.equal(resultNewerZ.stderr, '')
+  assert.equal(resultNewerZ.stats.at(-1), fileZ)
+})
+
+// zsh sorts glob matches by locale collation, but `[[ a < b ]]` compares bytes.
+// For mixed-case names the two orderings disagree, so exercising both locales
+// stops the tie-break branch from being masked by a glob order that already
+// happens to match it.
+test('the equal-mtime tie-break stays byte-lexicographic under either glob collation', (t) => {
+  const harness = makeHarness(t)
+  const projectDir = join(harness.root, 'project-collation')
+  mkdirSync(projectDir)
+  const slug = projectDir.replaceAll('/', '-')
+  const transcriptsDir = join(harness.root, '.claude', 'projects', slug)
+  mkdirSync(transcriptsDir, { recursive: true })
+  const upperFile = join(transcriptsDir, 'Z-session.jsonl')
+  const lowerFile = join(transcriptsDir, 'a-session.jsonl')
+  writeFileSync(upperFile, '')
+  writeFileSync(lowerFile, '')
+
+  assert(upperFile < lowerFile, 'Z-session must sort before a-session by byte value')
+
+  const now = 10_000
+  for (const locale of ['C', 'en_US.UTF-8']) {
+    const globOrder = spawnSync(
+      '/bin/zsh',
+      ['-c', `print -rl -- ${JSON.stringify(transcriptsDir)}/*.jsonl(N)`],
+      { encoding: 'utf8', env: { ...process.env, LC_ALL: locale } },
+    ).stdout.trim().split('\n').map((path) => basename(path)).join(', ')
+
+    const result = harness.run(
+      {
+        now,
+        mtimes: {
+          [upperFile]: now - 2400,
+          [lowerFile]: now - 2400,
+        },
+      },
+      { WD_TRANSCRIPT: undefined, LC_ALL: locale },
+      { cwd: projectDir },
+    )
+
+    const where = `LC_ALL=${locale} (glob order: ${globOrder})`
+    assert.equal(result.status, 0, where)
+    assert.equal(result.stderr, '', where)
+    assert.equal(result.stats.at(-1), upperFile, where)
+  }
+})
+
+test('explicit empty WD_TRANSCRIPT does not perform default discovery and disables heartbeat', (t) => {
+  const harness = makeHarness(t)
+  const projectDir = join(harness.root, 'project-empty')
+  mkdirSync(projectDir)
+  const slug = projectDir.replaceAll('/', '-')
+  const transcriptsDir = join(harness.root, '.claude', 'projects', slug)
+  mkdirSync(transcriptsDir, { recursive: true })
+  const transcriptFile = join(transcriptsDir, 'matched.jsonl')
+  writeFileSync(transcriptFile, '')
+
+  const now = 10_000
+  const result = harness.run(
+    {
+      now,
+      mtimes: {
+        [transcriptFile]: now - 3600,
+      },
+    },
+    { WD_TRANSCRIPT: '' },
+    { cwd: projectDir },
+  )
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.deepEqual(result.lines, [])
+  assert(!result.stats.includes(transcriptFile), 'default transcript was inspected despite explicit empty WD_TRANSCRIPT')
+})
+
+test('explicit nonempty WD_TRANSCRIPT containing spaces is used verbatim', (t) => {
+  const harness = makeHarness(t)
+  const spaceDir = join(harness.root, 'project with spaces')
+  mkdirSync(spaceDir)
+  const spaceTranscript = join(spaceDir, 'session with spaces.jsonl')
+  writeFileSync(spaceTranscript, '')
+
+  const now = 10_000
+  const result = harness.run(
+    {
+      now,
+      mtimes: {
+        [spaceTranscript]: now - 2400,
+      },
+    },
+    { WD_TRANSCRIPT: spaceTranscript },
+  )
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.equal(result.lines.length, 1)
+  assert.match(result.lines[0], /^HEARTBEAT: idle 40min/)
+  assert(result.stats.includes(spaceTranscript))
+})
+
+test('external Antigravity stall claim still emits when transcript is unset and missing', (t) => {
+  const harness = makeHarness(t)
+  const processes = {
+    501: processFixture({
+      comm: 'agy',
+      args: 'agy -p "run brief"',
+      etime: '02:00',
+      lstart: 'start-501',
+      openFiles: [],
+    }),
+  }
+
+  const result = harness.run(
+    {
+      now: 10_000,
+      processes,
+    },
+    { WD_TRANSCRIPT: undefined },
+  )
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.deepEqual(result.lines, [
+    'AGY STALL: agy pid 501 own conversation database missing after 120s',
+  ])
+  assert.deepEqual(harness.markers('agy'), ['.wd-agy-501-start_501'])
+})
+test('all-negative default transcript mtimes select the greatest, with no numeric sentinel', (t) => {
+  const harness = makeHarness(t)
+  // Glob order is alpha, beta, gamma; the winner is neither first nor last, so
+  // a first-match or last-match selection cannot pass by accident.
+  const { files, projectDir } = makeDefaultTranscripts(harness, 'project-all-negative', [
+    'alpha.jsonl',
+    'beta.jsonl',
+    'gamma.jsonl',
+  ])
+
+  const result = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [files['alpha.jsonl']]: -7200,
+        [files['beta.jsonl']]: -1800,
+        [files['gamma.jsonl']]: -14_400,
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: projectDir },
+  )
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.equal(result.lines.length, 1)
+  assert.match(result.lines[0], /^HEARTBEAT: idle 196min/)
+  assert.equal(result.stats.at(-1), files['beta.jsonl'])
+})
+
+test('mixed negative, zero, and positive default transcript mtimes select the greatest', (t) => {
+  const harness = makeHarness(t)
+  // Glob order is negative, positive, zero; the greatest value sits in the middle.
+  const { files, projectDir } = makeDefaultTranscripts(harness, 'project-mixed-signs', [
+    'negative.jsonl',
+    'positive.jsonl',
+    'zero.jsonl',
+  ])
+
+  const result = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [files['negative.jsonl']]: -500,
+        [files['positive.jsonl']]: 120,
+        [files['zero.jsonl']]: 0,
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: projectDir },
+  )
+
+  assert.equal(result.status, 0)
+  assert.equal(result.stderr, '')
+  assert.equal(result.lines.length, 1)
+  assert.match(result.lines[0], /^HEARTBEAT: idle 164min/)
+  assert.equal(result.stats.at(-1), files['positive.jsonl'])
+})
+
+test('equal negative default transcript mtimes keep the byte-lexicographic tie-break under either glob collation', (t) => {
+  const harness = makeHarness(t)
+  const { files, projectDir, transcriptsDir } = makeDefaultTranscripts(harness, 'project-negative-tie', [
+    'Z-negative.jsonl',
+    'a-negative.jsonl',
+  ])
+  const upperFile = files['Z-negative.jsonl']
+  const lowerFile = files['a-negative.jsonl']
+
+  assert(upperFile < lowerFile, 'Z-negative must sort before a-negative by byte value')
+
+  for (const locale of ['C', 'en_US.UTF-8']) {
+    const globOrder = spawnSync(
+      '/bin/zsh',
+      ['-c', `print -rl -- ${JSON.stringify(transcriptsDir)}/*.jsonl(N)`],
+      { encoding: 'utf8', env: { ...process.env, LC_ALL: locale } },
+    ).stdout.trim().split('\n').map((path) => basename(path)).join(', ')
+
+    const result = harness.run(
+      {
+        now: 10_000,
+        mtimes: {
+          [upperFile]: -2400,
+          [lowerFile]: -2400,
+        },
+      },
+      { WD_TRANSCRIPT: undefined, LC_ALL: locale },
+      { cwd: projectDir },
+    )
+
+    const where = `LC_ALL=${locale} (glob order: ${globOrder})`
+    assert.equal(result.status, 0, where)
+    assert.equal(result.stderr, '', where)
+    assert.equal(result.lines.length, 1, where)
+    assert.match(result.lines[0], /^HEARTBEAT: idle 206min/, where)
+    assert.equal(result.stats.at(-1), upperFile, where)
+  }
+})
+
+test('default transcript mtimes with a leading plus or leading zeros are compared as base 10', (t) => {
+  const harness = makeHarness(t)
+  // Glob order is padded, plus, zeroed; `+0007000` is the greatest value.
+  const signed = makeDefaultTranscripts(harness, 'project-signed-forms', [
+    'padded.jsonl',
+    'plus.jsonl',
+    'zeroed.jsonl',
+  ])
+
+  const signedResult = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [signed.files['padded.jsonl']]: '0000004000',
+        [signed.files['plus.jsonl']]: '+0007000',
+        [signed.files['zeroed.jsonl']]: '0100',
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: signed.projectDir },
+  )
+
+  assert.equal(signedResult.status, 0)
+  assert.equal(signedResult.stderr, '')
+  assert.equal(signedResult.lines.length, 1)
+  assert.match(signedResult.lines[0], /^HEARTBEAT: idle 50min/)
+  assert.equal(signedResult.stats.at(-1), signed.files['plus.jsonl'])
+
+  // `0100` is 100, not octal 64: read as octal it would lose to `80`.
+  // Glob order is aa-eighty, bb-padded, cc-seventy, so the winner is in the middle.
+  const octal = makeDefaultTranscripts(harness, 'project-leading-zeros', [
+    'aa-eighty.jsonl',
+    'bb-padded.jsonl',
+    'cc-seventy.jsonl',
+  ])
+
+  const octalResult = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [octal.files['aa-eighty.jsonl']]: '80',
+        [octal.files['bb-padded.jsonl']]: '0100',
+        [octal.files['cc-seventy.jsonl']]: '70',
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: octal.projectDir },
+  )
+
+  assert.equal(octalResult.status, 0)
+  assert.equal(octalResult.stderr, '')
+  assert.equal(octalResult.lines.length, 1)
+  assert.match(octalResult.lines[0], /^HEARTBEAT: idle 165min/)
+  assert.equal(octalResult.stats.at(-1), octal.files['bb-padded.jsonl'])
+})
+
+test('malformed and malformed-signed default transcript mtimes are non-conclusive and skipped', (t) => {
+  const harness = makeHarness(t)
+  // Every malformed value would outrank the one valid candidate if it were
+  // parsed, and `zbad-unreadable.jsonl` has no fixture entry so its stat fails.
+  const malformed = {
+    'bad-double-minus.jsonl': '--9999',
+    'bad-empty.jsonl': '',
+    'bad-exponent.jsonl': '9e9',
+    'bad-fraction.jsonl': '9999.5',
+    'bad-hex.jsonl': '0x9999',
+    'bad-lead-space.jsonl': ' 9999',
+    'bad-lone-minus.jsonl': '-',
+    'bad-lone-plus.jsonl': '+',
+    'bad-plus-minus.jsonl': '+-9999',
+    'bad-suffix.jsonl': '9999abc',
+    'bad-trail-space.jsonl': '9999 ',
+  }
+  const badNames = Object.keys(malformed)
+
+  const mixed = makeDefaultTranscripts(harness, 'project-malformed-mixed', [
+    ...badNames,
+    'good.jsonl',
+    'zbad-unreadable.jsonl',
+  ])
+  const mixedMtimes = { [mixed.files['good.jsonl']]: 2000 }
+  for (const [name, value] of Object.entries(malformed)) {
+    mixedMtimes[mixed.files[name]] = value
+  }
+
+  const mixedResult = harness.run(
+    { now: 10_000, mtimes: mixedMtimes },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: mixed.projectDir },
+  )
+
+  assert.equal(mixedResult.status, 0)
+  assert.equal(mixedResult.stderr, '')
+  assert.equal(mixedResult.lines.length, 1)
+  assert.match(mixedResult.lines[0], /^HEARTBEAT: idle 133min/)
+  assert.equal(mixedResult.stats.at(-1), mixed.files['good.jsonl'])
+
+  const onlyBad = makeDefaultTranscripts(harness, 'project-malformed-only', badNames)
+  const onlyBadMtimes = {}
+  for (const [name, value] of Object.entries(malformed)) {
+    onlyBadMtimes[onlyBad.files[name]] = value
+  }
+
+  const onlyBadResult = harness.run(
+    { now: 10_000, mtimes: onlyBadMtimes },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: onlyBad.projectDir },
+  )
+
+  assert.equal(onlyBadResult.status, 0)
+  assert.equal(onlyBadResult.stderr, '')
+  assert.deepEqual(onlyBadResult.lines, [])
+})
+
+const INT64_MIN = '-9223372036854775808'
+const INT64_MAX = '9223372036854775807'
+// A saturated pre-1970 age is INT64_MAX seconds, which the heartbeat reports
+// as INT64_MAX / 60 minutes.
+const SATURATED_MINUTES = '153722867280912930'
+
+test('signed 64-bit boundary transcript mtimes are accepted at both extremes', (t) => {
+  const harness = makeHarness(t)
+  // Glob order is aa-min, bb-max, cc-mid; INT64_MAX wins from the middle, so
+  // neither a first-match nor a last-match selection can pass by accident.
+  const extremes = makeDefaultTranscripts(harness, 'project-int64-extremes', [
+    'aa-min.jsonl',
+    'bb-max.jsonl',
+    'cc-mid.jsonl',
+  ])
+
+  const maxResult = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [extremes.files['aa-min.jsonl']]: INT64_MIN,
+        [extremes.files['bb-max.jsonl']]: INT64_MAX,
+        [extremes.files['cc-mid.jsonl']]: -1000,
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: extremes.projectDir },
+  )
+
+  assert.equal(maxResult.status, 0)
+  assert.equal(maxResult.stderr, '')
+  // A far-future mtime makes the age negative, never a wrapped large positive.
+  assert.deepEqual(maxResult.lines, [])
+  assert.equal(maxResult.stats.at(-1), extremes.files['bb-max.jsonl'])
+
+  // INT64_MIN is a valid selection when it is the greatest conclusive value.
+  // Glob order is aa-unreadable, bb-min, cc-malformed; the winner is again in
+  // the middle, and `aa-unreadable.jsonl` has no fixture entry so its stat fails.
+  const minimum = makeDefaultTranscripts(harness, 'project-int64-min', [
+    'aa-unreadable.jsonl',
+    'bb-min.jsonl',
+    'cc-malformed.jsonl',
+  ])
+
+  const minResult = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [minimum.files['bb-min.jsonl']]: INT64_MIN,
+        [minimum.files['cc-malformed.jsonl']]: '9999.5',
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: minimum.projectDir },
+  )
+
+  assert.equal(minResult.status, 0)
+  assert.equal(minResult.stderr, '')
+  assert.equal(minResult.lines.length, 1)
+  assert.match(minResult.lines[0], new RegExp(`^HEARTBEAT: idle ${SATURATED_MINUTES}min`))
+  assert.equal(minResult.stats.at(-1), minimum.files['bb-min.jsonl'])
+})
+
+test('transcript mtimes one beyond the signed 64-bit range are non-conclusive and skipped', (t) => {
+  const harness = makeHarness(t)
+  // Every out-of-range value would outrank the one valid candidate if it were
+  // parsed, and each would make zsh truncate and complain on stderr if it ever
+  // reached arithmetic.
+  const outOfRange = {
+    'bad-over-max.jsonl': '9223372036854775808',
+    'bad-over-max-padded.jsonl': '000009223372036854775808',
+    'bad-over-max-plus.jsonl': '+9223372036854775808',
+    'bad-under-min.jsonl': '-9223372036854775809',
+    'bad-way-over.jsonl': '99999999999999999999',
+    'bad-way-under.jsonl': '-99999999999999999999',
+  }
+  const badNames = Object.keys(outOfRange)
+
+  const mixed = makeDefaultTranscripts(harness, 'project-out-of-range-mixed', [
+    ...badNames,
+    'good.jsonl',
+  ])
+  const mixedMtimes = { [mixed.files['good.jsonl']]: -1000 }
+  for (const [name, value] of Object.entries(outOfRange)) {
+    mixedMtimes[mixed.files[name]] = value
+  }
+
+  const mixedResult = harness.run(
+    { now: 10_000, mtimes: mixedMtimes },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: mixed.projectDir },
+  )
+
+  assert.equal(mixedResult.status, 0)
+  assert.equal(mixedResult.stderr, '')
+  assert.equal(mixedResult.lines.length, 1)
+  assert.match(mixedResult.lines[0], /^HEARTBEAT: idle 183min/)
+  assert.equal(mixedResult.stats.at(-1), mixed.files['good.jsonl'])
+
+  const onlyBad = makeDefaultTranscripts(harness, 'project-out-of-range-only', badNames)
+  const onlyBadMtimes = {}
+  for (const [name, value] of Object.entries(outOfRange)) {
+    onlyBadMtimes[onlyBad.files[name]] = value
+  }
+
+  const onlyBadResult = harness.run(
+    { now: 10_000, mtimes: onlyBadMtimes },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: onlyBad.projectDir },
+  )
+
+  assert.equal(onlyBadResult.status, 0)
+  assert.equal(onlyBadResult.stderr, '')
+  assert.deepEqual(onlyBadResult.lines, [])
+})
+
+test('boundary range checks use the zero-stripped magnitude, not the raw digit width', (t) => {
+  const harness = makeHarness(t)
+  // Glob order is aa-over, bb-min-padded; the padded INT64_MIN is longer than
+  // the rejected padded over-max value, so width alone cannot decide either.
+  const padded = makeDefaultTranscripts(harness, 'project-padded-bounds', [
+    'aa-over.jsonl',
+    'bb-min-padded.jsonl',
+  ])
+
+  const paddedMinResult = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [padded.files['aa-over.jsonl']]: '0000009223372036854775808',
+        [padded.files['bb-min-padded.jsonl']]: '-0000009223372036854775808',
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: padded.projectDir },
+  )
+
+  assert.equal(paddedMinResult.status, 0)
+  assert.equal(paddedMinResult.stderr, '')
+  assert.equal(paddedMinResult.lines.length, 1)
+  assert.match(paddedMinResult.lines[0], new RegExp(`^HEARTBEAT: idle ${SATURATED_MINUTES}min`))
+  assert.equal(paddedMinResult.stats.at(-1), padded.files['bb-min-padded.jsonl'])
+
+  // Glob order is aa-under, bb-max-padded, cc-mid; the padded, plus-signed
+  // INT64_MAX wins from the middle.
+  const maximum = makeDefaultTranscripts(harness, 'project-padded-max', [
+    'aa-under.jsonl',
+    'bb-max-padded.jsonl',
+    'cc-mid.jsonl',
+  ])
+
+  const paddedMaxResult = harness.run(
+    {
+      now: 10_000,
+      mtimes: {
+        [maximum.files['aa-under.jsonl']]: '-0000009223372036854775809',
+        [maximum.files['bb-max-padded.jsonl']]: '+0000009223372036854775807',
+        [maximum.files['cc-mid.jsonl']]: '0000005000',
+      },
+    },
+    { WD_TRANSCRIPT: undefined },
+    { cwd: maximum.projectDir },
+  )
+
+  assert.equal(paddedMaxResult.status, 0)
+  assert.equal(paddedMaxResult.stderr, '')
+  assert.deepEqual(paddedMaxResult.lines, [])
+  assert.equal(paddedMaxResult.stats.at(-1), maximum.files['bb-max-padded.jsonl'])
+})
+
+test('an explicitly named boundary transcript evaluates its heartbeat age without overflow', (t) => {
+  const harness = makeHarness(t)
+
+  // A pre-1970 age that would overflow signed 64 bits saturates at INT64_MAX
+  // seconds instead of wrapping to a small or negative age.
+  const minResult = harness.run({ now: 10_000, mtimes: { [harness.transcript]: INT64_MIN } })
+  assert.equal(minResult.status, 0)
+  assert.equal(minResult.stderr, '')
+  assert.equal(minResult.lines.length, 1)
+  assert.match(minResult.lines[0], new RegExp(`^HEARTBEAT: idle ${SATURATED_MINUTES}min, codex=0 alt=0`))
+
+  // The maximum valid WD_IDLE_SECS equals the saturation value, so the clamped
+  // age satisfies `>=` by equality rather than by exceeding it, and the
+  // threshold itself never makes zsh truncate a magnitude onto stderr.
+  const maxThresholdResult = harness.run(
+    { now: 10_000, mtimes: { [harness.transcript]: INT64_MIN } },
+    { WD_IDLE_SECS: INT64_MAX },
+  )
+  assert.equal(maxThresholdResult.status, 0)
+  assert.equal(maxThresholdResult.stderr, '')
+  assert.equal(maxThresholdResult.lines.length, 1)
+  assert.match(
+    maxThresholdResult.lines[0],
+    new RegExp(`^HEARTBEAT: idle ${SATURATED_MINUTES}min, codex=0 alt=0`),
+  )
+
+  // The opposite extreme stays exact and negative, so no heartbeat fires.
+  const maxResult = harness.run({ now: 10_000, mtimes: { [harness.transcript]: INT64_MAX } })
+  assert.equal(maxResult.status, 0)
+  assert.equal(maxResult.stderr, '')
+  assert.deepEqual(maxResult.lines, [])
+
+  // Just past either bound is non-conclusive: read as "just touched", silent.
+  for (const value of ['9223372036854775808', '-9223372036854775809', '1e9', ' 100']) {
+    const result = harness.run({ now: 10_000, mtimes: { [harness.transcript]: value } })
+    assert.equal(result.status, 0, value)
+    assert.equal(result.stderr, '', value)
+    assert.deepEqual(result.lines, [], value)
+  }
+
+  // Ordinary in-range timestamps remain exact through the same path.
+  const ordinaryResult = harness.run({ now: 10_000, mtimes: { [harness.transcript]: 10_000 - 3600 } })
+  assert.equal(ordinaryResult.status, 0)
+  assert.equal(ordinaryResult.stderr, '')
+  assert.equal(ordinaryResult.lines.length, 1)
+  assert.match(ordinaryResult.lines[0], /^HEARTBEAT: idle 60min/)
 })

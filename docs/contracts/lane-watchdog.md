@@ -103,7 +103,7 @@ Consumers and packaging validators must fail closed on any unrecognized or unsup
   - `shell` (`string`, required): `"/bin/zsh"`.
   - `shell_modules` (`array` of `string`, required): `["zsh/system"]`.
   - `stat_flavor` (`string`, required): `"bsd"`.
-  - `host_commands` (`array` of `string`, required): Lexicographically sorted array: `["date", "head", "ls", "lsof", "pgrep", "ps", "pwd", "rm", "sleep", "stat", "tr", "wc"]`.
+  - `host_commands` (`array` of `string`, required): Lexicographically sorted array: `["date", "lsof", "pgrep", "ps", "pwd", "rm", "sleep", "stat", "tr", "wc"]`.
   - `test_runtime` (`object`, required):
     - `engine` (`string`, required): `"node"`.
     - `min_version` (`string`, required): `"18.0.0"`.
@@ -185,7 +185,6 @@ Release creation requires all of the following conditions to be met:
 6. **Canonical USTAR and gzip conformance**: Archive structure must strictly match the canonical USTAR layout, metadata (uid/gid 0, empty uname/gname, mtime 0, no PAX/GNU headers, zero padding, two terminal zero blocks), and stdlib gzip normalization.
 7. **Bundle-safe ADOPTION.md**: Generated `ADOPTION.md` must have all relative links rewritten and validated against the bundle.
 8. **Reproducibility gate**: Two independent invocations of the packager must produce byte-for-byte identical archives and digests.
-9. **Runtime conformance prerequisite**: Current source does not yet meet the contracted fallback behavior for unset `WD_TRANSCRIPT` (it triggers a zsh `no matches found` glob failure when no default transcripts exist). **Release 0.1.0 is strictly forbidden** until a separately verified implementation and test change conforms to this contract.
 
 ### Refusal criteria
 
@@ -200,7 +199,6 @@ Release generation must fail closed and refuse to produce an artifact if:
 - Two independent builds produce differing bytes or digests.
 - `ADOPTION.md` retains relative links targeting files not present in the bundle.
 - The gate or test suite fails.
-- Release is attempted while known runtime non-conformance remains unresolved.
 
 ---
 
@@ -212,7 +210,7 @@ This section specifies the public runtime interface to ensure compatibility and 
 
 - **Operating system**: macOS (Darwin).
 - **Shell**: `/bin/zsh` with the `zsh/system` built-in module and `zsystem flock` support.
-- **Host tools**: `date`, `head`, `ls`, `lsof`, `pgrep`, `ps`, `pwd`, `rm`, `sleep`, `stat`, `tr`, `wc`.
+- **Host tools**: `date`, `lsof`, `pgrep`, `ps`, `pwd`, `rm`, `sleep`, `stat`, `tr`, `wc`.
 - **Filesystem stat**: BSD `stat` with `-f %m` epoch second formatting.
 - **Packaging/test runtime**: Node.js 18+ is required for tests and packaging; Node is **not** a runtime dependency for running `lane-watchdog.sh`.
 
@@ -230,7 +228,7 @@ The script accepts no positional command-line flags. All public configuration is
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WD_TRANSCRIPT` | Target: newest matching `*.jsonl` in `~/.claude/projects/<cwd-slug>/`, or empty if none | Session transcript path for heartbeat monitoring (see conformance note below) |
+| `WD_TRANSCRIPT` | Newest matching `*.jsonl` in `~/.claude/projects/<cwd-slug>/`, or empty if none | Session transcript path for heartbeat monitoring |
 | `WD_ALT_HOME` | `$HOME/.claude-alt` | Configuration root for alternate Claude accounts |
 | `WD_CODEX_SECS` | `900` | Codex elapsed time and rollout silence threshold in seconds (strict `>`) |
 | `WD_ALT_SECS` | `1200` | Alternate Claude transcript silence threshold in seconds (strict `>`) |
@@ -241,15 +239,26 @@ The script accepts no positional command-line flags. All public configuration is
 | `WD_STATE_DIR` | `${TMPDIR:-/tmp}` | State directory for sensor lock and alert suppression markers |
 | `WD_SAMPLE_SECS` | `60` | Interval in seconds between sampling iterations |
 
-#### Transcript default target behavior and release blocker
+#### Transcript default behavior
 
-The target public behavior for `WD_TRANSCRIPT` is:
+The public behavior for `WD_TRANSCRIPT` is:
 - When `WD_TRANSCRIPT` is unset:
-  - If matching default transcripts exist in `~/.claude/projects/<cwd-slug>/*.jsonl`, the newest transcript by modification time is chosen.
+  - If matching default transcripts exist in `~/.claude/projects/<cwd-slug>/*.jsonl`, the newest transcript by modification time is chosen. Candidates whose modification time cannot be read are skipped. When two or more candidates share the greatest modification time, the tie is broken deterministically by choosing the byte-lexicographically smallest absolute path.
+  - A candidate's modification time is conclusive only when `stat` succeeds and its output is a whole base-10 integer, optionally carrying exactly one leading `+` or `-`. Whitespace-bearing, fractional, exponential, hexadecimal, empty, lone-sign, repeated-sign, and otherwise malformed values are non-conclusive, and those candidates are skipped without aborting discovery.
+  - Accepted values are compared as signed base-10 integers, so negative (pre-1970) epoch times are valid and leading zeros never denote octal. Selection carries no numeric sentinel: a candidate set whose modification times are all negative still selects the greatest of them.
+  - The accepted range is exactly signed 64-bit: `-9223372036854775808` through `9223372036854775807` inclusive, after normalizing any leading sign and leading zeros. A value outside that range — including one beyond either bound — is non-conclusive and its candidate is skipped, with no diagnostic on stderr.
   - If no matching default transcripts exist, `WD_TRANSCRIPT` resolves to empty string (`""`), disabling `HEARTBEAT:` monitoring only, while all external process sensors (Codex, alternate Claude, Antigravity) continue operating normally without zsh glob failure.
 - When `WD_TRANSCRIPT` is explicitly set, its value is used verbatim.
 
-**Conformance status**: Current source in the repository does not yet implement this no-match behavior; running without matching transcripts triggers a zsh `no matches found` glob failure before watchdog startup. Current behavior is non-compliant, and **release 0.1.0 is forbidden** until a separately verified implementation and test change conforms to this target specification.
+The resolved transcript's own modification time is read under the same rules. When `stat` fails or the value is non-conclusive, the transcript is treated as just modified, so `HEARTBEAT:` stays silent rather than acting on an untrusted value.
+
+#### `WD_IDLE_SECS` value domain
+
+A valid `WD_IDLE_SECS` is a whole base-10 integer in `0` through `9223372036854775807` inclusive; the default `1800` is unchanged. Any other value — a larger magnitude, a negative, a fraction, or otherwise non-integer text — is unsupported input rather than a supported configuration. The watchdog performs no runtime validation of `WD_IDLE_SECS`, so for out-of-domain values neither the heartbeat decision nor the stderr diagnostics specified in this contract are guaranteed.
+
+#### Heartbeat age saturation
+
+Transcript idle age is `now - mtime` in whole seconds and is exact for every ordinary timestamp. The single exception is a pre-1970 modification time so distant that `now - mtime` would exceed signed 64 bits: that age saturates at `9223372036854775807` seconds rather than wrapping. For every **valid** `WD_IDLE_SECS`, saturation leaves the heartbeat decision identical to the unbounded arithmetic: the unbounded age exceeds `9223372036854775807` and no valid threshold does, so the clamped age still satisfies `idle_age >= WD_IDLE_SECS` — including at the maximum valid threshold, where the two are equal. Only the reported minute count is capped.
 
 ### Output labels on stdout
 

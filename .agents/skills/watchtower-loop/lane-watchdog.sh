@@ -34,8 +34,78 @@
 #   WD_MAX_ITERATIONS=0 (unbounded)  WD_STATE_DIR=${TMPDIR:-/tmp}
 #   WD_SAMPLE_SECS=60
 
-slug=$(pwd | tr '/' '-')
-TRANSCRIPT=${WD_TRANSCRIPT:-$(ls -t ~/.claude/projects/$slug/*.jsonl 2>/dev/null | head -1)}
+# Signed 64-bit bounds as digit strings. An mtime is range-checked against
+# these lexically, before any arithmetic: zsh cannot evaluate a magnitude past
+# INT64_MAX without truncating and complaining on stderr, and INT64_MIN's own
+# magnitude (9223372036854775808) is exactly such a value.
+EPOCH_MAX_MAGNITUDE='9223372036854775807'
+EPOCH_MIN_MAGNITUDE='9223372036854775808'
+# Integer-typed so zsh reads their stored numeric value in arithmetic instead
+# of re-parsing the text — re-parsing "-9223372036854775808" as a literal is
+# the same magnitude trap.
+typeset -i EPOCH_INT64_MAX PARSED_EPOCH cand_mtime best_mtime
+typeset -i transcript_mtime idle_age
+(( EPOCH_INT64_MAX = 10#$EPOCH_MAX_MAGNITUDE ))
+
+# Validate one `stat -f %m` reading and set PARSED_EPOCH. Accepts a whole
+# base-10 integer carrying at most one leading + or -, with any number of
+# leading zeros, whose normalized value fits the signed 64-bit range
+# -9223372036854775808..9223372036854775807. Everything else — whitespace,
+# fractions, exponents, hex, lone or repeated signs, and values one beyond
+# either bound — is non-conclusive: return 1 with no output, and the caller
+# skips that reading.
+parse_epoch_seconds() {
+  local raw=$1 sign='' digits limit
+  [[ "$raw" == (|[-+])<-> ]] || return 1
+  [[ "$raw" == -* ]] && sign='-'
+  digits=${raw#[-+]}
+  # Normalize away leading zeros so the range check compares magnitudes.
+  while (( ${#digits} > 1 )) && [[ "$digits" == 0* ]]; do
+    digits=${digits#0}
+  done
+  if [[ -n "$sign" ]]; then
+    limit=$EPOCH_MIN_MAGNITUDE
+  else
+    limit=$EPOCH_MAX_MAGNITUDE
+  fi
+  (( ${#digits} > ${#limit} )) && return 1
+  # Equal-width decimal strings compare numerically byte-lexicographically.
+  if (( ${#digits} == ${#limit} )) && [[ "$digits" > "$limit" ]]; then
+    return 1
+  fi
+  # One base-10 conversion of the normalized signed token. `10#` keeps leading
+  # zeros decimal and carries the sign inline, so INT64_MIN is converted
+  # directly and its positive magnitude is never constructed.
+  (( PARSED_EPOCH = 10#${sign}${digits} ))
+  return 0
+}
+
+if (( ${+WD_TRANSCRIPT} )); then
+  TRANSCRIPT=$WD_TRANSCRIPT
+else
+  TRANSCRIPT=''
+  slug=$(pwd | tr '/' '-')
+  candidates=( ~/.claude/projects/"$slug"/*.jsonl(N) )
+  # No numeric sentinel: epoch mtimes may be negative (pre-1970), so "have we
+  # seen a valid candidate yet" is tracked explicitly.
+  have_best=0
+  best_mtime=0
+  for candidate in "${candidates[@]}"; do
+    cand_text=$(stat -f %m "$candidate" 2>/dev/null)
+    stat_status=$?
+    if (( stat_status != 0 )) || ! parse_epoch_seconds "$cand_text"; then
+      continue
+    fi
+    (( cand_mtime = PARSED_EPOCH ))
+    if (( ! have_best )) || (( cand_mtime > best_mtime )); then
+      have_best=1
+      (( best_mtime = cand_mtime ))
+      TRANSCRIPT=$candidate
+    elif (( cand_mtime == best_mtime )) && [[ "$candidate" < "$TRANSCRIPT" ]]; then
+      TRANSCRIPT=$candidate
+    fi
+  done
+fi
 ALT_HOME=${WD_ALT_HOME:-$HOME/.claude-alt}
 CODEX_SECS=${WD_CODEX_SECS:-900}
 ALT_SECS=${WD_ALT_SECS:-1200}
@@ -221,8 +291,24 @@ cleanup_missing_markers() {
 
 while true; do
   now=$(date +%s)
-  transcript_mtime=$(stat -f %m "$TRANSCRIPT" 2>/dev/null || print -r -- "$now")
-  idle_age=$(( now - transcript_mtime ))
+  transcript_mtime_text=$(stat -f %m "$TRANSCRIPT" 2>/dev/null)
+  transcript_stat_status=$?
+  if (( transcript_stat_status != 0 )) || ! parse_epoch_seconds "$transcript_mtime_text"; then
+    # Unreadable or non-conclusive reads as "just touched", so the heartbeat
+    # stays silent rather than acting on a value it cannot trust.
+    (( transcript_mtime = now ))
+  else
+    (( transcript_mtime = PARSED_EPOCH ))
+  fi
+  # `now - transcript_mtime` overflows signed 64 bits only for an absurd
+  # pre-1970 mtime, whose clamped age still meets every valid WD_IDLE_SECS
+  # threshold under `>=`, so saturate at INT64_MAX instead of silently wrapping
+  # to a small or negative age. Ordinary timestamps are unaffected and exact.
+  if (( transcript_mtime < 0 && now > EPOCH_INT64_MAX + transcript_mtime )); then
+    (( idle_age = EPOCH_INT64_MAX ))
+  else
+    (( idle_age = now - transcript_mtime ))
+  fi
   alt_n=0
   codex_discovery_ok=0
   alt_discovery_ok=0
