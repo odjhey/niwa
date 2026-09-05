@@ -29,5 +29,5 @@ exists only for repos without a live-state home.
 | `TASK-008` | [Remove ADC auth from Antigravity routing](TASK-008.md) | merged |
 | `TASK-009` | [Publish cross-project lane-supervision adoption guide](TASK-009.md) | merged |
 | `TASK-010` | [Define lane-watchdog package contract](TASK-010.md) | merged |
-| `TASK-011` | [Conform transcript discovery for release](TASK-011.md) | draft |
+| `TASK-011` | [Conform transcript discovery for release](TASK-011.md) | abandoned |
 | `TASK-012` | [Recover transcript release conformance](TASK-012.md) | draft |

@@ -1,7 +1,7 @@
 ---
 id: TASK-011
 type: task-card
-status: draft
+status: abandoned
 authority: normative
 description: 'Make transcript discovery conform to the public lane-watchdog contract before release packaging.'
 provenance: 'TASK-010 accepted follow-up and Luna verification finding, run BXZTZI, 2026-09-04'
