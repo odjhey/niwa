@@ -1,7 +1,7 @@
 ---
 id: TASK-010
 type: task-card
-status: draft
+status: merged
 authority: normative
 description: 'Define the public lane-watchdog vendor bundle, release interface, versioning, and MIT licensing contract.'
 provenance: 'Operator-approved GitHub vendor-bundle distribution and MIT license, 2026-09-04'

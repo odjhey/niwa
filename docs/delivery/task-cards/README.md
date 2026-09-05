@@ -28,4 +28,4 @@ exists only for repos without a live-state home.
 | `TASK-007` | [Detect stalled Antigravity lanes](TASK-007.md) | merged |
 | `TASK-008` | [Remove ADC auth from Antigravity routing](TASK-008.md) | merged |
 | `TASK-009` | [Publish cross-project lane-supervision adoption guide](TASK-009.md) | merged |
-| `TASK-010` | [Define lane-watchdog package contract](TASK-010.md) | draft |
+| `TASK-010` | [Define lane-watchdog package contract](TASK-010.md) | merged |
